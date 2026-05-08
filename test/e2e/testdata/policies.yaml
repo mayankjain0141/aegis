@@ -1,0 +1,14 @@
+version: "test-v1"
+policies:
+  - name: block-destructive-shell
+    match:
+      tool: shell_exec
+      args_pattern: "(rm\\s+(-[a-z]*)?r[a-z]*f|DROP TABLE|shutdown|reboot|mkfs|dd if=)"
+    action: deny
+    severity: critical
+
+  - name: default-allow
+    match:
+      tool: "*"
+    action: allow
+    severity: low

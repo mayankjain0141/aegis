@@ -6,24 +6,30 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
+	"time"
 
 	"github.com/mayjain/aegis/internal/ipc"
+	"github.com/mayjain/aegis/internal/policy"
+	"github.com/mayjain/aegis/internal/risk"
 	"github.com/mayjain/aegis/internal/session"
 )
 
 // Router handles incoming envelopes and dispatches them.
 type Router struct {
-	sessions *session.Registry
-	executor *Executor
-	logger   *slog.Logger
+	sessions        *session.Registry
+	executor        *Executor
+	policyEvaluator policy.PolicyEvaluator
+	riskScorer      *risk.CompositeScorer
+	logger          *slog.Logger
 }
 
-func NewRouter(executor *Executor, logger *slog.Logger) *Router {
+func NewRouter(executor *Executor, policyEval policy.PolicyEvaluator, riskScorer *risk.CompositeScorer, logger *slog.Logger) *Router {
 	return &Router{
-		sessions: session.NewRegistry(),
-		executor: executor,
-		logger:   logger,
+		sessions:        session.NewRegistry(),
+		executor:        executor,
+		policyEvaluator: policyEval,
+		riskScorer:      riskScorer,
+		logger:          logger,
 	}
 }
 
@@ -71,7 +77,7 @@ func (r *Router) handleRegister(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 }
 
 func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, error) {
-	_, ok := r.sessions.Get(env.ShimID)
+	sess, ok := r.sessions.Get(env.ShimID)
 	if !ok {
 		return &ipc.AegisEnvelope{
 			Type:   "error",
@@ -86,15 +92,56 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		"tool", env.ToolName,
 	)
 
-	toolName, args := extractToolCall(env.MCPMessage)
+	start := time.Now()
 
-	if denied, msg := r.checkPolicy(toolName, args); denied {
-		r.logger.Warn("request blocked by policy",
-			"shim_id", env.ShimID,
-			"tool", toolName,
-			"reason", msg,
-		)
-		denyResp := buildDenyResponse(env.MCPMessage, msg)
+	toolName, args := extractToolCall(env.MCPMessage)
+	argsJSON, _ := json.Marshal(args)
+
+	sessCtx := sess.GetContext()
+
+	riskScore := r.riskScorer.Score(context.Background(), toolName, string(argsJSON), sessCtx.CallsLastMinute)
+
+	policyReq := &policy.ToolCallRequest{
+		AgentID:   env.AgentID,
+		Tool:      toolName,
+		Arguments: string(argsJSON),
+		RequestID: env.RequestID,
+		SessionCtx: &policy.SessionContext{
+			CallsLastMinute: sessCtx.CallsLastMinute,
+			CallsLastHour:   sessCtx.CallsLastHour,
+			RecentTools:     sessCtx.RecentTools,
+			SessionStarted:  sessCtx.SessionStarted.Format(time.RFC3339),
+		},
+	}
+
+	decision, err := r.policyEvaluator.Evaluate(context.Background(), policyReq)
+	if err != nil {
+		r.logger.Error("policy evaluation error", "error", err, "tool", toolName)
+		errResp := buildErrorResponse(env.MCPMessage, "internal policy error")
+		return &ipc.AegisEnvelope{
+			Type:       "mcp_response",
+			ShimID:     env.ShimID,
+			RequestID:  env.RequestID,
+			SessionID:  env.SessionID,
+			MCPMessage: errResp,
+		}, nil
+	}
+
+	latency := time.Since(start)
+	r.logger.Info("policy decision",
+		"tool", toolName,
+		"risk_score", riskScore,
+		"decision", decision.Action,
+		"policy_name", decision.PolicyName,
+		"latency_us", latency.Microseconds(),
+	)
+
+	sess.RecordCall(toolName, riskScore, string(decision.Action))
+
+	switch decision.Action {
+	case policy.ActionDeny:
+		reason := fmt.Sprintf("Blocked by Aegis: %s", decision.Reason)
+		denyResp := buildDenyResponse(env.MCPMessage, reason)
 		return &ipc.AegisEnvelope{
 			Type:       "mcp_response",
 			ShimID:     env.ShimID,
@@ -102,6 +149,31 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 			SessionID:  env.SessionID,
 			MCPMessage: denyResp,
 		}, nil
+
+	case policy.ActionThrottle:
+		reason := fmt.Sprintf("Blocked by Aegis: rate limited (%s)", decision.Reason)
+		denyResp := buildDenyResponse(env.MCPMessage, reason)
+		return &ipc.AegisEnvelope{
+			Type:       "mcp_response",
+			ShimID:     env.ShimID,
+			RequestID:  env.RequestID,
+			SessionID:  env.SessionID,
+			MCPMessage: denyResp,
+		}, nil
+
+	case policy.ActionEscalateHuman:
+		reason := "Blocked by Aegis: human approval not yet implemented"
+		denyResp := buildDenyResponse(env.MCPMessage, reason)
+		return &ipc.AegisEnvelope{
+			Type:       "mcp_response",
+			ShimID:     env.ShimID,
+			RequestID:  env.RequestID,
+			SessionID:  env.SessionID,
+			MCPMessage: denyResp,
+		}, nil
+
+	default:
+		// ActionAllow — proceed to executor
 	}
 
 	result, err := r.executor.Execute(context.Background(), env.ToolName, env.MCPMessage)
@@ -137,19 +209,6 @@ func (r *Router) handleCancel(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, error
 		ShimID:    env.ShimID,
 		RequestID: env.RequestID,
 	}, nil
-}
-
-// checkPolicy applies hardcoded policy rules.
-// Returns (denied bool, reason string).
-func (r *Router) checkPolicy(toolName string, args map[string]any) (bool, string) {
-	if toolName == "shell_exec" {
-		for _, v := range args {
-			if s, ok := v.(string); ok && strings.Contains(s, "rm -rf") {
-				return true, "Blocked by Aegis: dangerous pattern 'rm -rf' detected"
-			}
-		}
-	}
-	return false, ""
 }
 
 // extractToolCall parses the MCP JSON-RPC message to get the tool name and arguments.

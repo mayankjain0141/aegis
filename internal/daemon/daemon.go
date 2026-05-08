@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/mayjain/aegis/internal/ipc"
+	"github.com/mayjain/aegis/internal/policy"
+	"github.com/mayjain/aegis/internal/risk"
 )
 
 type Daemon struct {
@@ -20,6 +22,10 @@ type Daemon struct {
 }
 
 func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
+	return NewWithPolicy(socketPath, configPath, "policies/default.yaml", logger)
+}
+
+func NewWithPolicy(socketPath string, configPath string, policyPath string, logger *slog.Logger) *Daemon {
 	tools, err := LoadToolsConfig(configPath)
 	if err != nil {
 		logger.Warn("failed to load tools config, using empty config", "path", configPath, "error", err)
@@ -28,8 +34,41 @@ func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
 	logger.Info("loaded tools config", "path", configPath, "tools", len(tools))
 
 	executor := NewExecutor(tools, logger)
+
+	var policyEval policy.PolicyEvaluator
+	if policyPath != "" {
+		eval, err := policy.LoadFromFile(policyPath)
+		if err != nil {
+			logger.Warn("failed to load policy file, using default-deny", "path", policyPath, "error", err)
+			eval = policy.NewStaticEvaluator(nil, "fallback", policy.ActionDeny)
+		} else {
+			logger.Info("loaded policy", "path", policyPath, "version", eval.Version(), "rules", eval.RuleCount())
+		}
+		reloader := policy.NewHotReloader(eval)
+		policyEval = reloader
+
+		go func() {
+			_ = policy.WatchAndReload(context.Background(), policyPath, reloader, logger)
+		}()
+	} else {
+		policyEval = policy.NewStaticEvaluator(nil, "empty", policy.ActionDeny)
+	}
+
+	scorer := risk.NewCompositeScorer(
+		[]risk.RiskSignal{
+			risk.ToolClassificationSignal{},
+			risk.ArgPatternSignal{},
+			risk.RateSignal{},
+		},
+		map[string]float64{
+			"tool_class":  1.0,
+			"arg_pattern": 1.0,
+			"rate":        1.0,
+		},
+	)
+
 	return &Daemon{
-		router:     NewRouter(executor, logger),
+		router:     NewRouter(executor, policyEval, scorer, logger),
 		socketPath: socketPath,
 		logger:     logger,
 	}

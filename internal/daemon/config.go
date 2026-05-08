@@ -12,6 +12,7 @@ import (
 // Config holds the daemon configuration.
 type Config struct {
 	SocketPath string
+	PolicyPath string // path to policies YAML
 	Mode       string // "enforce" or "audit"
 	LogLevel   string
 	Tools      map[string]ToolConfig

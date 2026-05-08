@@ -5,25 +5,74 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mayjain/aegis/internal/ipc"
+	"github.com/mayjain/aegis/internal/policy"
+	"github.com/mayjain/aegis/internal/risk"
 )
+
+const testPolicyYAML = `version: "test-v1"
+policies:
+  - name: block-destructive-shell
+    match:
+      tool: shell_exec
+      args_pattern: "(rm\\s+(-[a-z]*)?r[a-z]*f|DROP TABLE|shutdown|reboot|mkfs|dd if=)"
+    action: deny
+    severity: critical
+
+  - name: default-allow
+    match:
+      tool: "*"
+    action: allow
+    severity: low
+`
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-func testRouter() *Router {
+func testPolicyEvaluator(t *testing.T) policy.PolicyEvaluator {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test-policy.yaml")
+	if err := os.WriteFile(path, []byte(testPolicyYAML), 0644); err != nil {
+		t.Fatalf("write test policy: %v", err)
+	}
+	eval, err := policy.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("load test policy: %v", err)
+	}
+	return eval
+}
+
+func testRiskScorer() *risk.CompositeScorer {
+	return risk.NewCompositeScorer(
+		[]risk.RiskSignal{
+			risk.ToolClassificationSignal{},
+			risk.ArgPatternSignal{},
+			risk.RateSignal{},
+		},
+		map[string]float64{
+			"tool_class":  1.0,
+			"arg_pattern": 1.0,
+			"rate":        1.0,
+		},
+	)
+}
+
+func testRouter(t *testing.T) *Router {
 	tools := map[string]ToolConfig{
 		"shell-mcp": {Command: "echo", Args: []string{"mock"}},
 	}
 	exec := NewExecutor(tools, testLogger())
-	return NewRouter(exec, testLogger())
+	return NewRouter(exec, testPolicyEvaluator(t), testRiskScorer(), testLogger())
 }
 
 func TestRouter_Register(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
@@ -54,7 +103,7 @@ func TestRouter_Register(t *testing.T) {
 }
 
 func TestRouter_Register_MissingShimID(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
@@ -75,7 +124,7 @@ func TestRouter_Register_MissingShimID(t *testing.T) {
 }
 
 func TestRouter_UnregisteredReject(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
@@ -99,11 +148,10 @@ func TestRouter_UnregisteredReject(t *testing.T) {
 }
 
 func TestRouter_MCPRequest(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
-	// Register first
 	regEnv := &ipc.AegisEnvelope{
 		Type:     "register",
 		ShimID:   "shim_001",
@@ -115,7 +163,6 @@ func TestRouter_MCPRequest(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	// Send MCP request
 	mcpMsg := json.RawMessage(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"ls"}},"id":42}`)
 	reqEnv := &ipc.AegisEnvelope{
 		Type:       "mcp_request",
@@ -153,11 +200,10 @@ func TestRouter_MCPRequest(t *testing.T) {
 }
 
 func TestRouter_MCPRequest_DangerousBlocked(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
-	// Register
 	regEnv := &ipc.AegisEnvelope{
 		Type:     "register",
 		ShimID:   "shim_001",
@@ -168,7 +214,6 @@ func TestRouter_MCPRequest_DangerousBlocked(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	// Send dangerous MCP request with "rm -rf" in arguments
 	mcpMsg := json.RawMessage(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"rm -rf /"}},"id":99}`)
 	reqEnv := &ipc.AegisEnvelope{
 		Type:       "mcp_request",
@@ -208,8 +253,8 @@ func TestRouter_MCPRequest_DangerousBlocked(t *testing.T) {
 	if len(mcpResp.Result.Content) == 0 {
 		t.Fatal("expected content in deny response")
 	}
-	if mcpResp.Result.Content[0].Text != "Blocked by Aegis: dangerous pattern 'rm -rf' detected" {
-		t.Errorf("deny text = %q", mcpResp.Result.Content[0].Text)
+	if !strings.Contains(mcpResp.Result.Content[0].Text, "Blocked by Aegis") {
+		t.Errorf("deny text = %q, expected 'Blocked by Aegis'", mcpResp.Result.Content[0].Text)
 	}
 	if string(mcpResp.ID) != "99" {
 		t.Errorf("id = %s, want 99", mcpResp.ID)
@@ -217,11 +262,10 @@ func TestRouter_MCPRequest_DangerousBlocked(t *testing.T) {
 }
 
 func TestRouter_MCPRequest_SafeAllowed(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
-	// Register
 	regEnv := &ipc.AegisEnvelope{
 		Type:     "register",
 		ShimID:   "shim_001",
@@ -232,7 +276,6 @@ func TestRouter_MCPRequest_SafeAllowed(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	// Send safe MCP request
 	mcpMsg := json.RawMessage(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"ls -la"}},"id":7}`)
 	reqEnv := &ipc.AegisEnvelope{
 		Type:       "mcp_request",
@@ -274,8 +317,47 @@ func TestRouter_MCPRequest_SafeAllowed(t *testing.T) {
 	}
 }
 
+func TestRouter_MCPRequest_RiskScoreComputed(t *testing.T) {
+	r := testRouter(t)
+	conn, _ := net.Pipe()
+	defer conn.Close()
+
+	regEnv := &ipc.AegisEnvelope{
+		Type:     "register",
+		ShimID:   "shim_001",
+		AgentID:  "agent1",
+		ToolName: "shell-mcp",
+	}
+	if _, err := r.HandleEnvelope(conn, regEnv); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	mcpMsg := json.RawMessage(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"ls"}},"id":10}`)
+	reqEnv := &ipc.AegisEnvelope{
+		Type:       "mcp_request",
+		ShimID:     "shim_001",
+		RequestID:  "req_risk",
+		ToolName:   "shell-mcp",
+		MCPMessage: mcpMsg,
+	}
+
+	_, err := r.HandleEnvelope(conn, reqEnv)
+	if err != nil {
+		t.Fatalf("HandleEnvelope failed: %v", err)
+	}
+
+	sess, ok := r.sessions.Get("shim_001")
+	if !ok {
+		t.Fatal("session not found")
+	}
+	ctx := sess.GetContext()
+	if ctx.CallsLastMinute < 1 {
+		t.Error("expected at least 1 call recorded")
+	}
+}
+
 func TestRouter_Cancel(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 
@@ -295,7 +377,7 @@ func TestRouter_Cancel(t *testing.T) {
 }
 
 func TestRouter_UnknownType(t *testing.T) {
-	r := testRouter()
+	r := testRouter(t)
 	conn, _ := net.Pipe()
 	defer conn.Close()
 

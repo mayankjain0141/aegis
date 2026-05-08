@@ -1,5 +1,7 @@
 package errs
 
+import "fmt"
+
 // JSON-RPC error codes for infrastructure failures only.
 // Policy denials use CallToolResult with isError=true (not JSON-RPC errors).
 const (
@@ -13,6 +15,20 @@ func DenyResult(reason string) map[string]any {
 	return map[string]any{
 		"content": []map[string]any{
 			{"type": "text", "text": reason},
+		},
+		"isError": true,
+	}
+}
+
+// ThrottleResult constructs an MCP CallToolResult with isError=true for rate-limiting.
+func ThrottleResult(reason string, retryAfterSec int) map[string]any {
+	msg := reason
+	if retryAfterSec > 0 {
+		msg = fmt.Sprintf("%s (retry after %ds)", reason, retryAfterSec)
+	}
+	return map[string]any{
+		"content": []map[string]any{
+			{"type": "text", "text": msg},
 		},
 		"isError": true,
 	}

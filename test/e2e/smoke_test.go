@@ -22,7 +22,7 @@ func startDaemon(t *testing.T) (context.CancelFunc, <-chan struct{}) {
 	os.Remove(testSocket)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	d := daemon.New(testSocket, "testdata/aegis.yaml", logger)
+	d := daemon.NewWithPolicy(testSocket, "testdata/aegis.yaml", "testdata/policies.yaml", logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
