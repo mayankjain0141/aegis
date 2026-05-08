@@ -1,0 +1,7 @@
+tools:
+  shell-mcp:
+    command: "echo"
+    args: ["mock-shell-tool"]
+  filesystem-mcp:
+    command: "echo"
+    args: ["mock-fs-tool"]

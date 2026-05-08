@@ -24,7 +24,7 @@ build:
 	go build -o bin/aegis-watch ./cmd/watch
 
 smoke:
-	@echo "TODO: <5s smoke test"
+	@export PATH="/opt/homebrew/bin:$$PATH" && go test ./test/e2e/... -v -count=1 -timeout=10s
 
 test:
 	go test ./...
