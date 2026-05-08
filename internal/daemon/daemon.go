@@ -19,9 +19,17 @@ type Daemon struct {
 	wg         sync.WaitGroup
 }
 
-func New(socketPath string, logger *slog.Logger) *Daemon {
+func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
+	tools, err := LoadToolsConfig(configPath)
+	if err != nil {
+		logger.Warn("failed to load tools config, using empty config", "path", configPath, "error", err)
+		tools = map[string]ToolConfig{}
+	}
+	logger.Info("loaded tools config", "path", configPath, "tools", len(tools))
+
+	executor := NewExecutor(tools, logger)
 	return &Daemon{
-		router:     NewRouter(logger),
+		router:     NewRouter(executor, logger),
 		socketPath: socketPath,
 		logger:     logger,
 	}

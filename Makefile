@@ -5,13 +5,13 @@ hello:
 	@rm -f /tmp/aegis.sock
 	@go build -o /tmp/aegis-daemon-test ./cmd/daemon
 	@go build -o /tmp/aegis-shim-test ./cmd/shim
-	@/tmp/aegis-daemon-test & DAEMON_PID=$$!; \
+	@/tmp/aegis-daemon-test --config=aegis.yaml & DAEMON_PID=$$!; \
 		sleep 0.3; \
-		RESULT=$$(echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"test"},"id":1}' | /tmp/aegis-shim-test --tool=test --agent-id=hello-test); \
+		RESULT=$$(echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"ls"}},"id":1}' | /tmp/aegis-shim-test --tool=shell-mcp --agent-id=hello-test); \
 		kill $$DAEMON_PID 2>/dev/null; \
 		wait $$DAEMON_PID 2>/dev/null; \
 		echo "Response: $$RESULT"; \
-		if echo "$$RESULT" | grep -q '"method":"tools/call"'; then \
+		if echo "$$RESULT" | grep -q 'tool executed successfully'; then \
 			echo "✓ Hello World IPC: PASS"; \
 		else \
 			echo "✗ Hello World IPC: FAIL"; exit 1; \

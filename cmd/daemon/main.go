@@ -13,6 +13,7 @@ import (
 
 func main() {
 	socketPath := flag.String("socket", "/tmp/aegis.sock", "Unix socket path")
+	configPath := flag.String("config", "aegis.yaml", "Path to aegis.yaml config file")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -21,7 +22,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	d := daemon.New(*socketPath, logger)
+	d := daemon.New(*socketPath, *configPath, logger)
 	if err := d.Run(ctx); err != nil {
 		logger.Error("daemon failed", "error", err)
 		os.Exit(1)

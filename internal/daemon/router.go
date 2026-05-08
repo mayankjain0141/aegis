@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 
 	"github.com/mayjain/aegis/internal/ipc"
 	"github.com/mayjain/aegis/internal/session"
@@ -12,12 +15,14 @@ import (
 // Router handles incoming envelopes and dispatches them.
 type Router struct {
 	sessions *session.Registry
+	executor *Executor
 	logger   *slog.Logger
 }
 
-func NewRouter(logger *slog.Logger) *Router {
+func NewRouter(executor *Executor, logger *slog.Logger) *Router {
 	return &Router{
 		sessions: session.NewRegistry(),
+		executor: executor,
 		logger:   logger,
 	}
 }
@@ -81,13 +86,43 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		"tool", env.ToolName,
 	)
 
-	// Phase 1A: echo the MCP message back (tool execution comes in Phase 1C)
+	toolName, args := extractToolCall(env.MCPMessage)
+
+	if denied, msg := r.checkPolicy(toolName, args); denied {
+		r.logger.Warn("request blocked by policy",
+			"shim_id", env.ShimID,
+			"tool", toolName,
+			"reason", msg,
+		)
+		denyResp := buildDenyResponse(env.MCPMessage, msg)
+		return &ipc.AegisEnvelope{
+			Type:       "mcp_response",
+			ShimID:     env.ShimID,
+			RequestID:  env.RequestID,
+			SessionID:  env.SessionID,
+			MCPMessage: denyResp,
+		}, nil
+	}
+
+	result, err := r.executor.Execute(context.Background(), env.ToolName, env.MCPMessage)
+	if err != nil {
+		r.logger.Error("executor error", "error", err, "tool", env.ToolName)
+		errResp := buildErrorResponse(env.MCPMessage, err.Error())
+		return &ipc.AegisEnvelope{
+			Type:       "mcp_response",
+			ShimID:     env.ShimID,
+			RequestID:  env.RequestID,
+			SessionID:  env.SessionID,
+			MCPMessage: errResp,
+		}, nil
+	}
+
 	return &ipc.AegisEnvelope{
 		Type:       "mcp_response",
 		ShimID:     env.ShimID,
 		RequestID:  env.RequestID,
 		SessionID:  env.SessionID,
-		MCPMessage: env.MCPMessage,
+		MCPMessage: result,
 	}, nil
 }
 
@@ -102,4 +137,77 @@ func (r *Router) handleCancel(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, error
 		ShimID:    env.ShimID,
 		RequestID: env.RequestID,
 	}, nil
+}
+
+// checkPolicy applies hardcoded policy rules.
+// Returns (denied bool, reason string).
+func (r *Router) checkPolicy(toolName string, args map[string]any) (bool, string) {
+	if toolName == "shell_exec" {
+		for _, v := range args {
+			if s, ok := v.(string); ok && strings.Contains(s, "rm -rf") {
+				return true, "Blocked by Aegis: dangerous pattern 'rm -rf' detected"
+			}
+		}
+	}
+	return false, ""
+}
+
+// extractToolCall parses the MCP JSON-RPC message to get the tool name and arguments.
+func extractToolCall(mcpMessage json.RawMessage) (string, map[string]any) {
+	var msg struct {
+		Params struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(mcpMessage, &msg); err != nil {
+		return "", nil
+	}
+	return msg.Params.Name, msg.Params.Arguments
+}
+
+// extractRequestID gets the id field from the MCP JSON-RPC message.
+func extractRequestID(mcpMessage json.RawMessage) json.RawMessage {
+	var msg struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(mcpMessage, &msg); err != nil {
+		return json.RawMessage(`null`)
+	}
+	if msg.ID == nil {
+		return json.RawMessage(`null`)
+	}
+	return msg.ID
+}
+
+func buildDenyResponse(mcpMessage json.RawMessage, reason string) json.RawMessage {
+	id := extractRequestID(mcpMessage)
+	resp := map[string]any{
+		"jsonrpc": "2.0",
+		"result": map[string]any{
+			"content": []map[string]any{
+				{"type": "text", "text": reason},
+			},
+			"isError": true,
+		},
+		"id": id,
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+func buildErrorResponse(mcpMessage json.RawMessage, errMsg string) json.RawMessage {
+	id := extractRequestID(mcpMessage)
+	resp := map[string]any{
+		"jsonrpc": "2.0",
+		"result": map[string]any{
+			"content": []map[string]any{
+				{"type": "text", "text": "Executor error: " + errMsg},
+			},
+			"isError": true,
+		},
+		"id": id,
+	}
+	data, _ := json.Marshal(resp)
+	return data
 }
