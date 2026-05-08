@@ -17,8 +17,6 @@ const (
 	defaultFlushInterval = 100 * time.Millisecond
 )
 
-// WALWriter is a placeholder for Phase 3B — local write-ahead log fallback.
-type WALWriter struct{}
 
 // BatchCollector buffers TraceEvents and writes them in batches to PostgreSQL.
 // If no PG connection is available, events are logged to stderr.
