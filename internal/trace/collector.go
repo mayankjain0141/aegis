@@ -131,7 +131,13 @@ func (bc *BatchCollector) drainChannel() {
 	_ = bc.flushLocked()
 }
 
+// SetWAL attaches a WAL writer to the collector for PG-failure fallback.
+func (bc *BatchCollector) SetWAL(w *WALWriter) {
+	bc.wal = w
+}
+
 // flushLocked writes pending events to PG (or logs them). Caller must hold flushMu.
+// If PG write fails and a WAL is configured, events are written to WAL instead.
 func (bc *BatchCollector) flushLocked() error {
 	if len(bc.pending) == 0 {
 		return nil
@@ -143,6 +149,14 @@ func (bc *BatchCollector) flushLocked() error {
 	var err error
 	if bc.db != nil {
 		err = bc.writeToPG(batch)
+		if err != nil && bc.wal != nil {
+			bc.logger.Warn("pg write failed, falling back to WAL", "error", err, "events", len(batch))
+			for _, ev := range batch {
+				if walErr := bc.wal.Write(ev); walErr != nil {
+					bc.logger.Error("wal write failed", "error", walErr)
+				}
+			}
+		}
 	} else {
 		bc.writeToLog(batch)
 	}

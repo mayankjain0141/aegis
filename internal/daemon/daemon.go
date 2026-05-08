@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mayjain/aegis/internal/ipc"
 	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/internal/risk"
@@ -19,6 +20,8 @@ type Daemon struct {
 	collector  *trace.BatchCollector
 	listener   net.Listener
 	socketPath string
+	pgURL      string
+	db         *pgxpool.Pool
 	logger     *slog.Logger
 	wg         sync.WaitGroup
 }
@@ -28,6 +31,10 @@ func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
 }
 
 func NewWithPolicy(socketPath string, configPath string, policyPath string, logger *slog.Logger) *Daemon {
+	return NewWithOptions(socketPath, configPath, policyPath, "", logger)
+}
+
+func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *slog.Logger) *Daemon {
 	tools, err := LoadToolsConfig(configPath)
 	if err != nil {
 		logger.Warn("failed to load tools config, using empty config", "path", configPath, "error", err)
@@ -69,7 +76,28 @@ func NewWithPolicy(socketPath string, configPath string, policyPath string, logg
 		},
 	)
 
-	collector := trace.NewBatchCollector(nil, logger)
+	var db *pgxpool.Pool
+	if pgURL != "" {
+		pool, err := pgxpool.New(context.Background(), pgURL)
+		if err != nil {
+			logger.Error("pg connect failed, running in no-PG mode", "error", err)
+		} else {
+			if err := pool.Ping(context.Background()); err != nil {
+				logger.Error("pg ping failed, running in no-PG mode", "error", err)
+				pool.Close()
+			} else {
+				if err := trace.RunMigrations(context.Background(), pool); err != nil {
+					logger.Error("pg migrations failed", "error", err)
+					pool.Close()
+				} else {
+					db = pool
+					logger.Info("pg connected and migrated", "url", pgURL)
+				}
+			}
+		}
+	}
+
+	collector := trace.NewBatchCollector(db, logger)
 	router := NewRouter(executor, policyEval, scorer, logger)
 	router.SetCollector(collector)
 
@@ -77,8 +105,15 @@ func NewWithPolicy(socketPath string, configPath string, policyPath string, logg
 		router:     router,
 		collector:  collector,
 		socketPath: socketPath,
+		pgURL:      pgURL,
+		db:         db,
 		logger:     logger,
 	}
+}
+
+// PGConnected reports whether the daemon has an active PostgreSQL connection.
+func (d *Daemon) PGConnected() bool {
+	return d.db != nil
 }
 
 func (d *Daemon) Router() *Router {
@@ -126,6 +161,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) Shutdown() error {
 	if d.collector != nil {
 		_ = d.collector.Close()
+	}
+	if d.db != nil {
+		d.db.Close()
 	}
 	if d.listener != nil {
 		return d.listener.Close()
