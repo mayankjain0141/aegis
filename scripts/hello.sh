@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-rm -f /tmp/aegis.sock
 go build -o /tmp/aegis-daemon-test ./cmd/daemon
 go build -o /tmp/aegis-shim-test ./cmd/shim
 
