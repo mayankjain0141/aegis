@@ -7,7 +7,7 @@ hello:
 	@go build -o /tmp/aegis-shim-test ./cmd/shim
 	@/tmp/aegis-daemon-test & DAEMON_PID=$$!; \
 		sleep 0.3; \
-		RESULT=$$(echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"test"},"id":1}' | /tmp/aegis-shim-test); \
+		RESULT=$$(echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"test"},"id":1}' | /tmp/aegis-shim-test --tool=test --agent-id=hello-test); \
 		kill $$DAEMON_PID 2>/dev/null; \
 		wait $$DAEMON_PID 2>/dev/null; \
 		echo "Response: $$RESULT"; \
