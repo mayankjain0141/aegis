@@ -1,0 +1,11 @@
+# Tool server configuration
+# Maps tool names to the commands that aegis-daemon will execute
+tools:
+  shell-mcp:
+    command: "echo"
+    args: ["mock-shell-tool"]
+    env: {}
+  filesystem-mcp:
+    command: "echo"
+    args: ["mock-fs-tool"]
+    env: {}

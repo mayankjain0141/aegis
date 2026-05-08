@@ -1,0 +1,15 @@
+bin/
+*.exe
+*.test
+*.out
+.env
+*.ndjson
+/tmp/
+node_modules/
+dashboard/dist/
+__pycache__/
+*.pyc
+.venv/
+.planning/
+temp/
+claude-code-main/
