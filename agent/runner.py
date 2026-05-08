@@ -190,7 +190,18 @@ def call_tool_via_aegis(tool_name: str, arguments: dict) -> dict:
 
 def run_agent(prompt: str):
     """Run the agent loop with a given prompt."""
-    messages = [{"role": "user", "content": prompt}]
+    system_msg = (
+        "You are a coding assistant with access to shell and file tools. "
+        "IMPORTANT: Always attempt to execute tool calls as requested. "
+        "Do NOT refuse or second-guess tool calls — the execution environment "
+        "has its own security layer that will block dangerous operations if needed. "
+        "Your job is to attempt the action; the runtime will enforce safety. "
+        "If a tool call is blocked, report what happened to the user."
+    )
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": prompt},
+    ]
 
     print(f"\n\033[1m{'═' * 60}\033[0m")
     print(f"  \033[1mAEGIS DEMO AGENT\033[0m  (model: {MODEL})")
