@@ -56,6 +56,38 @@ The **shim** is a drop-in stdio wrapper that agents talk to as if it were the re
 ## Quick Start
 
 ```bash
+# Install (requires Go 1.23+)
+go install github.com/mayjain/aegis/cmd/daemon@latest
+go install github.com/mayjain/aegis/cmd/shim@latest
+
+# Or build from source
+git clone https://github.com/mayjain/aegis.git
+cd aegis
+make build
+
+# Start the daemon
+bin/aegis-daemon --policies policies/default.yaml
+
+# In another terminal — watch live traces
+bin/aegis-watch
+
+# Run the attack simulation (111 scenarios)
+make test-attacks
+
+# Use with Claude Code — add to .cursor/mcp.json:
+# {
+#   "mcpServers": {
+#     "shell": {
+#       "command": "aegis-shim",
+#       "args": ["--tool", "shell-mcp", "--agent-id", "my-claude"]
+#     }
+#   }
+# }
+```
+
+### From source
+
+```bash
 # Build all binaries
 make build
 

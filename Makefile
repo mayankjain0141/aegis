@@ -1,9 +1,14 @@
-.PHONY: build smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello
+.PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello
 
 build:
 	go build -o bin/aegis-daemon ./cmd/daemon
 	go build -o bin/aegis-shim ./cmd/shim
 	go build -o bin/aegis-watch ./cmd/watch
+
+install:
+	go install ./cmd/daemon
+	go install ./cmd/shim
+	go install ./cmd/watch
 
 test:
 	go test ./...
