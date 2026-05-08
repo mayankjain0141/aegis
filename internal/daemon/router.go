@@ -23,6 +23,7 @@ type Router struct {
 	riskScorer      *risk.CompositeScorer
 	collector       trace.Collector
 	logger          *slog.Logger
+	onTrace         func([]byte) // called after each trace emit with JSON
 }
 
 func NewRouter(executor *Executor, policyEval policy.PolicyEvaluator, riskScorer *risk.CompositeScorer, logger *slog.Logger) *Router {
@@ -38,6 +39,11 @@ func NewRouter(executor *Executor, policyEval policy.PolicyEvaluator, riskScorer
 // SetCollector attaches a trace collector to the router.
 func (r *Router) SetCollector(c trace.Collector) {
 	r.collector = c
+}
+
+// SetOnTrace sets a callback invoked with JSON-serialized trace events.
+func (r *Router) SetOnTrace(fn func([]byte)) {
+	r.onTrace = fn
 }
 
 func (r *Router) Sessions() *session.Registry {
@@ -236,6 +242,12 @@ func (r *Router) emitTrace(env *ipc.AegisEnvelope, toolName string, riskScore fl
 		ev.Error = err.Error()
 	}
 	r.collector.Emit(ev)
+
+	if r.onTrace != nil {
+		if data, jsonErr := json.Marshal(ev); jsonErr == nil {
+			r.onTrace(data)
+		}
+	}
 }
 
 func (r *Router) handleCancel(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, error) {

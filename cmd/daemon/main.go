@@ -17,6 +17,7 @@ func main() {
 	configPath := flag.String("config", "aegis.yaml", "Path to aegis.yaml config file")
 	policyPath := flag.String("policies", "policies/default.yaml", "Path to policies YAML file")
 	pgURL := flag.String("pg-url", "", "PostgreSQL connection URL (env: AEGIS_PG_URL)")
+	httpPort := flag.Int("http-port", 8080, "HTTP server port for health/metrics/ws")
 	flag.Parse()
 
 	if *pgURL == "" {
@@ -29,7 +30,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	d := daemon.NewWithOptions(*socketPath, *configPath, *policyPath, *pgURL, logger)
+	d := daemon.NewWithHTTP(*socketPath, *configPath, *policyPath, *pgURL, *httpPort, logger)
 
 	if d.PGConnected() {
 		fmt.Fprintf(os.Stderr, "aegis-daemon: PG connected\n")

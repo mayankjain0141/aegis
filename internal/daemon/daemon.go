@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/internal/risk"
 	"github.com/mayjain/aegis/internal/trace"
+	"github.com/mayjain/aegis/internal/ws"
 )
 
 type Daemon struct {
@@ -24,6 +27,12 @@ type Daemon struct {
 	db         *pgxpool.Pool
 	logger     *slog.Logger
 	wg         sync.WaitGroup
+
+	hub        *ws.Hub
+	httpServer *http.Server
+	httpPort   int
+	metrics    Metrics
+	startTime  time.Time
 }
 
 func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
@@ -32,6 +41,12 @@ func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
 
 func NewWithPolicy(socketPath string, configPath string, policyPath string, logger *slog.Logger) *Daemon {
 	return NewWithOptions(socketPath, configPath, policyPath, "", logger)
+}
+
+func NewWithHTTP(socketPath, configPath, policyPath, pgURL string, httpPort int, logger *slog.Logger) *Daemon {
+	d := NewWithOptions(socketPath, configPath, policyPath, pgURL, logger)
+	d.httpPort = httpPort
+	return d
 }
 
 func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *slog.Logger) *Daemon {
@@ -101,14 +116,24 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 	router := NewRouter(executor, policyEval, scorer, logger)
 	router.SetCollector(collector)
 
-	return &Daemon{
+	hub := ws.NewHub()
+
+	d := &Daemon{
 		router:     router,
 		collector:  collector,
 		socketPath: socketPath,
 		pgURL:      pgURL,
 		db:         db,
 		logger:     logger,
+		hub:        hub,
+		startTime:  time.Now(),
 	}
+
+	router.SetOnTrace(func(data []byte) {
+		d.hub.Broadcast(data)
+	})
+
+	return d
 }
 
 // PGConnected reports whether the daemon has an active PostgreSQL connection.
@@ -130,6 +155,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Start WebSocket hub
+	hubCtx, hubCancel := context.WithCancel(ctx)
+	go d.hub.Run(hubCtx)
+
+	// Start HTTP server if port is configured
+	if d.httpPort > 0 {
+		addr := fmt.Sprintf(":%d", d.httpPort)
+		if err := d.startHTTP(ctx, addr); err != nil {
+			hubCancel()
+			return err
+		}
+	}
+
 	d.logger.Info("daemon started", "socket", d.socketPath)
 
 	go func() {
@@ -142,7 +180,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				// Expected shutdown
 			default:
 				d.logger.Error("accept failed", "error", err)
 			}
@@ -152,6 +189,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		go d.handleConn(ctx, conn)
 	}
 
+	hubCancel()
+	<-d.hub.Done()
 	d.drainConnections()
 	os.Remove(d.socketPath)
 	d.logger.Info("daemon stopped")
