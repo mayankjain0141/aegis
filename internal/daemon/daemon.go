@@ -11,10 +11,12 @@ import (
 	"github.com/mayjain/aegis/internal/ipc"
 	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/internal/risk"
+	"github.com/mayjain/aegis/internal/trace"
 )
 
 type Daemon struct {
 	router     *Router
+	collector  *trace.BatchCollector
 	listener   net.Listener
 	socketPath string
 	logger     *slog.Logger
@@ -67,8 +69,13 @@ func NewWithPolicy(socketPath string, configPath string, policyPath string, logg
 		},
 	)
 
+	collector := trace.NewBatchCollector(nil, logger)
+	router := NewRouter(executor, policyEval, scorer, logger)
+	router.SetCollector(collector)
+
 	return &Daemon{
-		router:     NewRouter(executor, policyEval, scorer, logger),
+		router:     router,
+		collector:  collector,
 		socketPath: socketPath,
 		logger:     logger,
 	}
@@ -117,6 +124,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) Shutdown() error {
+	if d.collector != nil {
+		_ = d.collector.Close()
+	}
 	if d.listener != nil {
 		return d.listener.Close()
 	}

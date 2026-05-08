@@ -12,6 +12,7 @@ import (
 	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/internal/risk"
 	"github.com/mayjain/aegis/internal/session"
+	"github.com/mayjain/aegis/internal/trace"
 )
 
 // Router handles incoming envelopes and dispatches them.
@@ -20,6 +21,7 @@ type Router struct {
 	executor        *Executor
 	policyEvaluator policy.PolicyEvaluator
 	riskScorer      *risk.CompositeScorer
+	collector       trace.Collector
 	logger          *slog.Logger
 }
 
@@ -31,6 +33,11 @@ func NewRouter(executor *Executor, policyEval policy.PolicyEvaluator, riskScorer
 		riskScorer:      riskScorer,
 		logger:          logger,
 	}
+}
+
+// SetCollector attaches a trace collector to the router.
+func (r *Router) SetCollector(c trace.Collector) {
+	r.collector = c
 }
 
 func (r *Router) Sessions() *session.Registry {
@@ -117,6 +124,8 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 	decision, err := r.policyEvaluator.Evaluate(context.Background(), policyReq)
 	if err != nil {
 		r.logger.Error("policy evaluation error", "error", err, "tool", toolName)
+		latency := time.Since(start)
+		r.emitTrace(env, toolName, riskScore, "error", nil, latency, err)
 		errResp := buildErrorResponse(env.MCPMessage, "internal policy error")
 		return &ipc.AegisEnvelope{
 			Type:       "mcp_response",
@@ -140,6 +149,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 
 	switch decision.Action {
 	case policy.ActionDeny:
+		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
 		reason := fmt.Sprintf("Blocked by Aegis: %s", decision.Reason)
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
 		return &ipc.AegisEnvelope{
@@ -151,6 +161,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		}, nil
 
 	case policy.ActionThrottle:
+		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
 		reason := fmt.Sprintf("Blocked by Aegis: rate limited (%s)", decision.Reason)
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
 		return &ipc.AegisEnvelope{
@@ -162,6 +173,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		}, nil
 
 	case policy.ActionEscalateHuman:
+		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
 		reason := "Blocked by Aegis: human approval not yet implemented"
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
 		return &ipc.AegisEnvelope{
@@ -176,10 +188,13 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		// ActionAllow — proceed to executor
 	}
 
-	result, err := r.executor.Execute(context.Background(), env.ToolName, env.MCPMessage)
-	if err != nil {
-		r.logger.Error("executor error", "error", err, "tool", env.ToolName)
-		errResp := buildErrorResponse(env.MCPMessage, err.Error())
+	result, execErr := r.executor.Execute(context.Background(), env.ToolName, env.MCPMessage)
+	latency = time.Since(start)
+	r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, execErr)
+
+	if execErr != nil {
+		r.logger.Error("executor error", "error", execErr, "tool", env.ToolName)
+		errResp := buildErrorResponse(env.MCPMessage, execErr.Error())
 		return &ipc.AegisEnvelope{
 			Type:       "mcp_response",
 			ShimID:     env.ShimID,
@@ -196,6 +211,31 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		SessionID:  env.SessionID,
 		MCPMessage: result,
 	}, nil
+}
+
+func (r *Router) emitTrace(env *ipc.AegisEnvelope, toolName string, riskScore float64, decision string, pd *policy.PolicyDecision, latency time.Duration, err error) {
+	if r.collector == nil {
+		return
+	}
+	ev := &trace.TraceEvent{
+		SessionID: env.SessionID,
+		RequestID: env.RequestID,
+		AgentID:   env.AgentID,
+		Timestamp: time.Now(),
+		Tool:      toolName,
+		RiskScore: riskScore,
+		Decision:  decision,
+		Mode:      "enforce",
+		LatencyMs: int(latency.Milliseconds()),
+	}
+	if pd != nil {
+		ev.PolicyID = pd.PolicyName
+		ev.PolicyVersion = pd.PolicyVersion
+	}
+	if err != nil {
+		ev.Error = err.Error()
+	}
+	r.collector.Emit(ev)
 }
 
 func (r *Router) handleCancel(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, error) {
