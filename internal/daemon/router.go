@@ -324,7 +324,11 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 
 	start := time.Now()
 
-	toolName, args := extractToolCall(env.MCPMessage)
+	toolName := env.ToolName
+	var args map[string]any
+	if env.MCPMessage != nil {
+		json.Unmarshal(env.MCPMessage, &args)
+	}
 	argsJSON, _ := json.Marshal(args)
 
 	sessCtx := sess.GetContext()

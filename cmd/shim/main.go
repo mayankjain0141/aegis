@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/mayjain/aegis/internal/ipc"
@@ -61,6 +62,12 @@ func main() {
 
 	cmd := exec.Command(toolCmd[0], toolCmd[1:]...)
 	cmd.Stderr = os.Stderr
+	defer func() {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "aegis-proxy", Version: "0.1.0"}, nil)
 	toolTransport := &mcp.CommandTransport{Command: cmd}
@@ -106,7 +113,7 @@ func registerProxyTool(server *mcp.Server, tool *mcp.Tool, toolSession *mcp.Clie
 		conn := *daemonConn
 		daemonMu.Unlock()
 
-		decision := evaluate(conn, daemonDone, pending, localEval, localScorer, toolName, argsJSON, shimID, agentID, logger)
+		decision := evaluate(ctx, conn, daemonMu, daemonDone, pending, localEval, localScorer, toolName, argsJSON, shimID, agentID, logger)
 
 		if decision.Action == "deny" {
 			return &mcp.CallToolResult{
@@ -231,12 +238,12 @@ func readLoop(conn net.Conn, pending *sync.Map, done chan struct{}, logger *slog
 	}
 }
 
-func evaluate(daemonConn net.Conn, daemonDone chan struct{}, pending *sync.Map,
+func evaluate(ctx context.Context, daemonConn net.Conn, daemonMu *sync.Mutex, daemonDone chan struct{}, pending *sync.Map,
 	localEval policy.PolicyEvaluator, localScorer *risk.CompositeScorer,
 	toolName, argsJSON, shimID, agentID string, logger *slog.Logger) *ipc.EvaluationResult {
 
 	if daemonConn != nil {
-		result, err := evaluateViaDaemon(daemonConn, daemonDone, pending, toolName, argsJSON, shimID, agentID)
+		result, err := evaluateViaDaemon(ctx, daemonConn, daemonMu, daemonDone, pending, toolName, argsJSON, shimID, agentID)
 		if err == nil {
 			return result
 		}
@@ -246,7 +253,7 @@ func evaluate(daemonConn net.Conn, daemonDone chan struct{}, pending *sync.Map,
 	return evaluateLocally(localEval, localScorer, toolName, argsJSON, agentID)
 }
 
-func evaluateViaDaemon(conn net.Conn, done chan struct{}, pending *sync.Map,
+func evaluateViaDaemon(ctx context.Context, conn net.Conn, mu *sync.Mutex, done chan struct{}, pending *sync.Map,
 	toolName, argsJSON, shimID, agentID string) (*ipc.EvaluationResult, error) {
 
 	requestID := uuid.New().String()
@@ -262,9 +269,21 @@ func evaluateViaDaemon(conn net.Conn, done chan struct{}, pending *sync.Map,
 		RequestID:  requestID,
 		MCPMessage: json.RawMessage(argsJSON),
 	}
-	if err := ipc.WriteEnvelope(conn, env); err != nil {
+
+	mu.Lock()
+	err := ipc.WriteEnvelope(conn, env)
+	mu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("send evaluate: %w", err)
 	}
+
+	timeout := 30 * time.Second
+	deadline, ok := ctx.Deadline()
+	if ok && time.Until(deadline) < timeout {
+		timeout = time.Until(deadline)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	select {
 	case resp, ok := <-ch:
@@ -280,6 +299,10 @@ func evaluateViaDaemon(conn net.Conn, done chan struct{}, pending *sync.Map,
 		return resp.Evaluation, nil
 	case <-done:
 		return nil, fmt.Errorf("daemon disconnected")
+	case <-ctx.Done():
+		return nil, fmt.Errorf("evaluation cancelled: %w", ctx.Err())
+	case <-timer.C:
+		return nil, fmt.Errorf("evaluation timed out after %v", timeout)
 	}
 }
 
@@ -310,8 +333,21 @@ func evaluateLocally(localEval policy.PolicyEvaluator, scorer *risk.CompositeSco
 		Reason:    decision.Reason,
 	}
 
-	if decision.Action == policy.ActionDeny {
+	switch decision.Action {
+	case policy.ActionAllow:
+		result.Action = "allow"
+	case policy.ActionDeny:
+		result.Action = "deny"
 		result.DenyMessage = fmt.Sprintf("Blocked by policy %q: %s (risk=%.2f)", decision.PolicyName, decision.Reason, riskScore)
+	case policy.ActionThrottle:
+		result.Action = "deny"
+		result.DenyMessage = fmt.Sprintf("Blocked by Aegis: rate limited (%s)", decision.Reason)
+	case policy.ActionEscalateHuman:
+		result.Action = "deny"
+		result.DenyMessage = "Blocked by Aegis: human approval required but not available in standalone mode"
+	default:
+		result.Action = "deny"
+		result.DenyMessage = "Blocked by Aegis: unknown policy action"
 	}
 
 	return result
