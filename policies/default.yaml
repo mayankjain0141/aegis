@@ -3,14 +3,35 @@ policies:
   - name: block-destructive-shell
     match:
       tool: shell_exec
-      args_pattern: "(rm -rf|DROP TABLE|shutdown|reboot|mkfs|dd if=)"
+      args_pattern: "(rm -rf|DROP TABLE|shutdown|reboot|mkfs|dd if=|fork bomb|:\\(\\)\\{|:\\(\\)|chmod\\s+[0-7]{3,4}\\s+/)"
     action: deny
     severity: critical
+
+  - name: block-prompt-injection
+    match:
+      tool: shell_exec
+      args_pattern: "(ignore previous|disregard prior|reveal system prompt|forget your instructions|override safety)"
+    action: deny
+    severity: critical
+
+  - name: block-privilege-escalation
+    match:
+      tool: shell_exec
+      args_pattern: "(sudo |su\\s+|chmod\\s|chown\\s|setuid|passwd)"
+    action: deny
+    severity: high
+
+  - name: block-exfiltration
+    match:
+      tool: shell_exec
+      args_pattern: "(curl.*(-d|--data)|wget.*\\|sh|nc\\s|ncat\\s|/dev/tcp/|exfil)"
+    action: deny
+    severity: high
 
   - name: block-secret-access
     match:
       tool: file_read
-      args_pattern: "(\\.env|credentials|secrets|private_key|id_rsa)"
+      args_pattern: "(\\.env|credentials|secrets|private_key|id_rsa|id_ed25519|\\.pem|token)"
     action: deny
     severity: high
 

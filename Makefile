@@ -34,7 +34,14 @@ test-e2e:
 	@echo "TODO: Full E2E with Docker"
 
 test-attacks:
-	@echo "TODO: Attack simulator"
+	@export PATH="/opt/homebrew/bin:$$PATH" && go build -o bin/aegis-daemon ./cmd/daemon && go build -o bin/aegis-shim ./cmd/shim
+	@rm -f /tmp/aegis.sock
+	@bin/aegis-daemon --policies policies/default.yaml & DAEMON_PID=$$!; \
+		sleep 0.5; \
+		python3 agent/harness.py; RESULT=$$?; \
+		kill $$DAEMON_PID 2>/dev/null; \
+		wait $$DAEMON_PID 2>/dev/null; \
+		exit $$RESULT
 
 bench:
 	go test -bench=. -benchmem ./test/bench/...
