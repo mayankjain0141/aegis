@@ -69,9 +69,10 @@ demo-live:
 	go build -o bin/aegis-shim ./cmd/shim && \
 	rm -f /tmp/aegis.sock && \
 	bin/aegis-daemon --policies policies/default.yaml & DAEMON_PID=$$!; \
-	sleep 0.5; \
-	python3 agent/runner.py; \
-	kill $$DAEMON_PID 2>/dev/null; wait $$DAEMON_PID 2>/dev/null
+	sleep 1; \
+	python3 agent/runner.py; RET=$$?; \
+	kill $$DAEMON_PID 2>/dev/null; wait $$DAEMON_PID 2>/dev/null; \
+	exit $$RET
 
 # Quality
 lint:
