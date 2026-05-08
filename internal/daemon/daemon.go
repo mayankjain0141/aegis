@@ -29,11 +29,12 @@ type Daemon struct {
 	logger     *slog.Logger
 	wg         sync.WaitGroup
 
-	hub        *ws.Hub
-	httpServer *http.Server
-	httpPort   int
-	metrics    Metrics
-	startTime  time.Time
+	hub              *ws.Hub
+	httpServer       *http.Server
+	httpPort         int
+	metrics          Metrics
+	startTime        time.Time
+	reloadCancel     context.CancelFunc
 }
 
 func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
@@ -61,6 +62,7 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 	executor := NewExecutor(tools, logger)
 
 	var policyEval policy.PolicyEvaluator
+	var reloadCancel context.CancelFunc
 	if policyPath != "" {
 		eval, err := policy.LoadFromFile(policyPath)
 		if err != nil {
@@ -72,8 +74,10 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 		reloader := policy.NewHotReloader(eval)
 		policyEval = reloader
 
+		var reloadCtx context.Context
+		reloadCtx, reloadCancel = context.WithCancel(context.Background())
 		go func() {
-			_ = policy.WatchAndReload(context.Background(), policyPath, reloader, logger)
+			_ = policy.WatchAndReload(reloadCtx, policyPath, reloader, logger)
 		}()
 	} else {
 		policyEval = policy.NewStaticEvaluator(nil, "empty", policy.ActionDeny)
@@ -123,14 +127,15 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 	router.SetApprovalGate(approvalGate)
 
 	d := &Daemon{
-		router:     router,
-		collector:  collector,
-		socketPath: socketPath,
-		pgURL:      pgURL,
-		db:         db,
-		logger:     logger,
-		hub:        hub,
-		startTime:  time.Now(),
+		router:       router,
+		collector:    collector,
+		socketPath:   socketPath,
+		pgURL:        pgURL,
+		db:           db,
+		logger:       logger,
+		hub:          hub,
+		startTime:    time.Now(),
+		reloadCancel: reloadCancel,
 	}
 
 	router.SetOnTrace(func(data []byte) {
@@ -202,6 +207,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) Shutdown() error {
+	if d.reloadCancel != nil {
+		d.reloadCancel()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -227,17 +236,22 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	d.logger.Debug("connection accepted", "remote", conn.RemoteAddr())
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		env, err := ipc.ReadEnvelope(conn)
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					continue
+				}
+			}
 			d.logger.Debug("connection closed", "error", err)
 			return
 		}
+
+		conn.SetReadDeadline(time.Time{})
 
 		resp, err := d.router.HandleEnvelope(conn, env)
 		if err != nil {

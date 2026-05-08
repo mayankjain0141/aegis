@@ -92,7 +92,7 @@ func (d *Daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
+		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
 	})
 	if err != nil {
 		d.logger.Error("ws accept failed", "error", err)

@@ -115,6 +115,7 @@ func (g *Gate) Resolve(approvalID string, action string, reason string) error {
 		return errors.New("approval already resolved")
 	}
 
+	g.broadcastResolved(approvalID, action, reason)
 	return nil
 }
 
@@ -126,6 +127,25 @@ func (g *Gate) PendingCount() int {
 		return true
 	})
 	return count
+}
+
+func (g *Gate) broadcastResolved(approvalID string, action string, reason string) {
+	msg := map[string]any{
+		"type": "approval_resolved",
+		"data": map[string]any{
+			"approval_id": approvalID,
+			"action":      action,
+			"reason":      reason,
+		},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		g.logger.Error("failed to marshal approval_resolved", "error", err)
+		return
+	}
+	if g.broadcast != nil {
+		g.broadcast(data)
+	}
 }
 
 func (g *Gate) broadcastRequest(req *PendingApproval) {

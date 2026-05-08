@@ -80,6 +80,7 @@ func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			h.drain()
 			h.mu.Lock()
 			for c := range h.clients {
 				close(c.send)
@@ -115,10 +116,29 @@ func (h *Hub) Run(ctx context.Context) {
 				select {
 				case c.send <- msg:
 				default:
-					// slow client — drop message
 				}
 			}
 			h.mu.RUnlock()
+		}
+	}
+}
+
+// drain delivers any remaining messages in the broadcast channel before shutdown.
+func (h *Hub) drain() {
+	for {
+		select {
+		case msg := <-h.broadcast:
+			h.replay.Write(msg)
+			h.mu.RLock()
+			for c := range h.clients {
+				select {
+				case c.send <- msg:
+				default:
+				}
+			}
+			h.mu.RUnlock()
+		default:
+			return
 		}
 	}
 }
