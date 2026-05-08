@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/mayjain/aegis/internal/approval"
 	"github.com/mayjain/aegis/internal/ipc"
 	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/internal/risk"
@@ -22,6 +23,7 @@ type Router struct {
 	policyEvaluator policy.PolicyEvaluator
 	riskScorer      *risk.CompositeScorer
 	collector       trace.Collector
+	approvalGate    *approval.Gate
 	logger          *slog.Logger
 	onTrace         func([]byte) // called after each trace emit with JSON
 }
@@ -44,6 +46,16 @@ func (r *Router) SetCollector(c trace.Collector) {
 // SetOnTrace sets a callback invoked with JSON-serialized trace events.
 func (r *Router) SetOnTrace(fn func([]byte)) {
 	r.onTrace = fn
+}
+
+// SetApprovalGate attaches a human approval gate to the router.
+func (r *Router) SetApprovalGate(gate *approval.Gate) {
+	r.approvalGate = gate
+}
+
+// ApprovalGate returns the router's approval gate (may be nil).
+func (r *Router) ApprovalGate() *approval.Gate {
+	return r.approvalGate
 }
 
 func (r *Router) Sessions() *session.Registry {
@@ -179,16 +191,56 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		}, nil
 
 	case policy.ActionEscalateHuman:
-		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
-		reason := "Blocked by Aegis: human approval not yet implemented"
-		denyResp := buildDenyResponse(env.MCPMessage, reason)
-		return &ipc.AegisEnvelope{
-			Type:       "mcp_response",
-			ShimID:     env.ShimID,
-			RequestID:  env.RequestID,
-			SessionID:  env.SessionID,
-			MCPMessage: denyResp,
-		}, nil
+		if r.approvalGate == nil {
+			r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
+			reason := "Blocked by Aegis: human approval not configured"
+			denyResp := buildDenyResponse(env.MCPMessage, reason)
+			return &ipc.AegisEnvelope{
+				Type:       "mcp_response",
+				ShimID:     env.ShimID,
+				RequestID:  env.RequestID,
+				SessionID:  env.SessionID,
+				MCPMessage: denyResp,
+			}, nil
+		}
+
+		pa := &approval.PendingApproval{
+			RequestID:   env.RequestID,
+			AgentID:     env.AgentID,
+			Tool:        toolName,
+			ArgsSummary: string(argsJSON),
+			RiskScore:   riskScore,
+		}
+
+		approvalResp, escalateErr := r.approvalGate.Escalate(context.Background(), pa)
+		latency = time.Since(start)
+
+		if escalateErr != nil {
+			r.emitTrace(env, toolName, riskScore, "error", decision, latency, escalateErr)
+			errResp := buildErrorResponse(env.MCPMessage, "approval error: "+escalateErr.Error())
+			return &ipc.AegisEnvelope{
+				Type:       "mcp_response",
+				ShimID:     env.ShimID,
+				RequestID:  env.RequestID,
+				SessionID:  env.SessionID,
+				MCPMessage: errResp,
+			}, nil
+		}
+
+		if approvalResp.Action != "approve" {
+			r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil)
+			reason := fmt.Sprintf("Blocked by Aegis: human denied (%s)", approvalResp.Reason)
+			denyResp := buildDenyResponse(env.MCPMessage, reason)
+			return &ipc.AegisEnvelope{
+				Type:       "mcp_response",
+				ShimID:     env.ShimID,
+				RequestID:  env.RequestID,
+				SessionID:  env.SessionID,
+				MCPMessage: denyResp,
+			}, nil
+		}
+
+		r.emitTrace(env, toolName, riskScore, "approve", decision, latency, nil)
 
 	default:
 		// ActionAllow — proceed to executor

@@ -13,11 +13,15 @@ const (
 	pongWait     = 60 * time.Second
 )
 
+// MessageHandler processes incoming WebSocket messages from clients.
+type MessageHandler func(data []byte)
+
 // Client is a middleman between the websocket connection and the hub.
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub       *Hub
+	conn      *websocket.Conn
+	send      chan []byte
+	onMessage MessageHandler
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn) *Client {
@@ -26,6 +30,11 @@ func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 		conn: conn,
 		send: make(chan []byte, sendBuf),
 	}
+}
+
+// SetMessageHandler sets a handler for incoming WebSocket messages.
+func (c *Client) SetMessageHandler(h MessageHandler) {
+	c.onMessage = h
 }
 
 // writePump pumps messages from the send channel to the websocket connection.
@@ -54,8 +63,8 @@ func (c *Client) writePump(ctx context.Context) {
 	}
 }
 
-// readPump reads from the websocket connection to detect disconnects.
-// It discards all incoming messages — only used to detect close/errors.
+// readPump reads from the websocket connection. If a MessageHandler is set,
+// incoming messages are dispatched to it; otherwise they are discarded.
 func (c *Client) readPump(ctx context.Context) {
 	defer func() {
 		c.hub.unregister <- c
@@ -63,9 +72,12 @@ func (c *Client) readPump(ctx context.Context) {
 	}()
 
 	for {
-		_, _, err := c.conn.Read(ctx)
+		_, data, err := c.conn.Read(ctx)
 		if err != nil {
 			return
+		}
+		if c.onMessage != nil {
+			c.onMessage(data)
 		}
 	}
 }

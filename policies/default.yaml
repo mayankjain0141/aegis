@@ -14,6 +14,13 @@ policies:
     action: deny
     severity: high
 
+  - name: escalate-file-delete
+    match:
+      tool: file_delete
+      args_pattern: ".*"
+    action: escalate_human
+    severity: high
+
   - name: rate-limit-all
     match:
       tool: "*"

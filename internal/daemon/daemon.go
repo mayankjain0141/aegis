@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mayjain/aegis/internal/approval"
 	"github.com/mayjain/aegis/internal/ipc"
 	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/internal/risk"
@@ -117,6 +118,9 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 	router.SetCollector(collector)
 
 	hub := ws.NewHub()
+
+	approvalGate := approval.NewGate(hub.Broadcast, 5*time.Minute, logger)
+	router.SetApprovalGate(approvalGate)
 
 	d := &Daemon{
 		router:     router,

@@ -100,6 +100,7 @@ func (d *Daemon) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := ws.NewClient(d.hub, conn)
+	client.SetMessageHandler(d.handleWSMessage)
 	client.Serve(r.Context())
 }
 
@@ -113,6 +114,40 @@ func (d *Daemon) BroadcastEvent(data []byte) {
 // Hub returns the WebSocket hub for external use.
 func (d *Daemon) Hub() *ws.Hub {
 	return d.hub
+}
+
+// handleWSMessage processes incoming WebSocket messages (approval responses).
+func (d *Daemon) handleWSMessage(data []byte) {
+	var msg struct {
+		Type string `json:"type"`
+		Data struct {
+			ApprovalID string `json:"approval_id"`
+			Reason     string `json:"reason"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		d.logger.Warn("invalid ws message", "error", err)
+		return
+	}
+
+	gate := d.router.ApprovalGate()
+	if gate == nil {
+		d.logger.Warn("received approval message but no gate configured")
+		return
+	}
+
+	switch msg.Type {
+	case "approve":
+		if err := gate.Resolve(msg.Data.ApprovalID, "approve", msg.Data.Reason); err != nil {
+			d.logger.Warn("approval resolve failed", "error", err, "id", msg.Data.ApprovalID)
+		}
+	case "deny":
+		if err := gate.Resolve(msg.Data.ApprovalID, "deny", msg.Data.Reason); err != nil {
+			d.logger.Warn("denial resolve failed", "error", err, "id", msg.Data.ApprovalID)
+		}
+	default:
+		d.logger.Debug("unhandled ws message type", "type", msg.Type)
+	}
 }
 
 // LoggerForTest exports the logger for testing.
