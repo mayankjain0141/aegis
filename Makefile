@@ -1,4 +1,4 @@
-.PHONY: build smoke test test-e2e test-attacks bench up down logs watch demo lint fmt ci hello
+.PHONY: build smoke test test-e2e test-attacks bench up down logs watch demo demo-live lint fmt ci hello
 
 # Phase 0
 hello:
@@ -61,6 +61,17 @@ watch:
 
 demo:
 	@bash scripts/demo.sh
+
+demo-live:
+	@export PATH="/opt/homebrew/bin:$$PATH" && \
+	if [ -f .env ]; then set -a; . ./.env; set +a; fi && \
+	go build -o bin/aegis-daemon ./cmd/daemon && \
+	go build -o bin/aegis-shim ./cmd/shim && \
+	rm -f /tmp/aegis.sock && \
+	bin/aegis-daemon --policies policies/default.yaml & DAEMON_PID=$$!; \
+	sleep 0.5; \
+	python3 agent/runner.py; \
+	kill $$DAEMON_PID 2>/dev/null; wait $$DAEMON_PID 2>/dev/null
 
 # Quality
 lint:
