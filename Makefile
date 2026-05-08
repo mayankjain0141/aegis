@@ -60,7 +60,7 @@ watch:
 	go run ./cmd/watch
 
 demo:
-	@echo "TODO: Full demo flow"
+	@bash scripts/demo.sh
 
 # Quality
 lint:
