@@ -13,7 +13,6 @@ import (
 const defaultSocket = "/tmp/aegis.sock"
 
 func main() {
-	// Read one line of JSON from stdin
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
 		fmt.Fprintln(os.Stderr, "aegis-shim: no input on stdin")
@@ -21,13 +20,11 @@ func main() {
 	}
 	input := scanner.Bytes()
 
-	// Validate it's valid JSON
 	if !json.Valid(input) {
 		fmt.Fprintln(os.Stderr, "aegis-shim: invalid JSON on stdin")
 		os.Exit(1)
 	}
 
-	// Connect to daemon
 	conn, err := net.Dial("unix", defaultSocket)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aegis-shim: daemon not running at %s: %v\n", defaultSocket, err)
@@ -35,11 +32,33 @@ func main() {
 	}
 	defer conn.Close()
 
-	// Wrap in envelope and send
+	// Register with the daemon
+	regEnv := &ipc.AegisEnvelope{
+		Type:    "register",
+		ShimID:  "shim_hello",
+		AgentID: "hello-test",
+	}
+	if err := ipc.WriteEnvelope(conn, regEnv); err != nil {
+		fmt.Fprintf(os.Stderr, "aegis-shim: register send failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	regResp, err := ipc.ReadEnvelope(conn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aegis-shim: register response failed: %v\n", err)
+		os.Exit(1)
+	}
+	if regResp.Type != "registered" {
+		fmt.Fprintf(os.Stderr, "aegis-shim: registration rejected: %s\n", regResp.Error)
+		os.Exit(1)
+	}
+
+	// Send MCP request
 	env := &ipc.AegisEnvelope{
 		Type:       "mcp_request",
 		ShimID:     "shim_hello",
 		AgentID:    "hello-test",
+		SessionID:  regResp.SessionID,
 		MCPMessage: json.RawMessage(input),
 	}
 
@@ -48,14 +67,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read response
 	resp, err := ipc.ReadEnvelope(conn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aegis-shim: receive failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Print MCP message to stdout
 	if resp.MCPMessage != nil {
 		fmt.Println(string(resp.MCPMessage))
 	}

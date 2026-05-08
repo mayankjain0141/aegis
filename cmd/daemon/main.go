@@ -1,75 +1,29 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"flag"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/mayjain/aegis/internal/ipc"
+	"github.com/mayjain/aegis/internal/daemon"
 )
 
-const socketPath = "/tmp/aegis.sock"
-
 func main() {
+	socketPath := flag.String("socket", "/tmp/aegis.sock", "Unix socket path")
+	flag.Parse()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	// Remove stale socket
-	os.Remove(socketPath)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
 
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		slog.Error("failed to listen", "path", socketPath, "error", err)
+	d := daemon.New(*socketPath, logger)
+	if err := d.Run(ctx); err != nil {
+		logger.Error("daemon failed", "error", err)
 		os.Exit(1)
-	}
-	defer listener.Close()
-	defer os.Remove(socketPath)
-
-	slog.Info("daemon started", "socket", socketPath, "mode", "echo")
-
-	// Handle shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
-	go func() {
-		<-sigCh
-		slog.Info("shutting down")
-		listener.Close()
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			// Listener closed (shutdown)
-			break
-		}
-		go handleConnection(conn)
-	}
-
-	fmt.Fprintln(os.Stderr, "daemon stopped")
-}
-
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
-	slog.Info("connection accepted")
-
-	for {
-		env, err := ipc.ReadEnvelope(conn)
-		if err != nil {
-			slog.Debug("connection closed", "error", err)
-			return
-		}
-
-		slog.Info("received envelope", "type", env.Type, "shim_id", env.ShimID, "tool", env.ToolName)
-
-		// Echo mode: send it right back
-		env.Type = "mcp_response"
-		if err := ipc.WriteEnvelope(conn, env); err != nil {
-			slog.Error("write failed", "error", err)
-			return
-		}
 	}
 }
