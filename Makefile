@@ -63,16 +63,7 @@ demo:
 	@bash scripts/demo.sh
 
 demo-live:
-	@export PATH="/opt/homebrew/bin:$$PATH" && \
-	if [ -f .env ]; then set -a; . ./.env; set +a; fi && \
-	go build -o bin/aegis-daemon ./cmd/daemon && \
-	go build -o bin/aegis-shim ./cmd/shim && \
-	rm -f /tmp/aegis.sock && \
-	bin/aegis-daemon --policies policies/default.yaml & DAEMON_PID=$$!; \
-	sleep 1; \
-	python3 agent/runner.py; RET=$$?; \
-	kill $$DAEMON_PID 2>/dev/null; wait $$DAEMON_PID 2>/dev/null; \
-	exit $$RET
+	@bash scripts/demo-live.sh
 
 # Quality
 lint:
