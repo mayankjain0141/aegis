@@ -108,8 +108,15 @@ class AegisShimConnection:
 
     def close(self):
         if self.proc:
-            self.proc.stdin.close()
-            self.proc.wait(timeout=5)
+            try:
+                self.proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
 
     def _next_id(self):
         self._id_counter += 1

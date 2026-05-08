@@ -62,9 +62,12 @@ func main() {
 
 	cmd := exec.Command(toolCmd[0], toolCmd[1:]...)
 	cmd.Stderr = os.Stderr
+	// Set process group so we can kill the tool AND all its children
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	defer func() {
 		if cmd.Process != nil {
-			cmd.Process.Kill()
+			// Kill entire process group (tool + any children it spawned)
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			cmd.Wait()
 		}
 	}()
