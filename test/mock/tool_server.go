@@ -1,131 +1,47 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
-	"os"
+	"log"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type jsonRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	ID      json.RawMessage `json:"id"`
-	Params  json.RawMessage `json:"params"`
+type ShellInput struct {
+	Command string `json:"command"`
 }
 
-type jsonRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any         `json:"result"`
+type FileInput struct {
+	Path string `json:"path"`
 }
 
 func main() {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	server := mcp.NewServer(&mcp.Implementation{Name: "mock-tool", Version: "0.1.0"}, nil)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var req jsonRPCRequest
-		if err := json.Unmarshal(line, &req); err != nil {
-			fmt.Fprintf(os.Stderr, "mock-tool-server: bad JSON: %v\n", err)
-			continue
-		}
-
-		resp := handleRequest(req)
-		out, _ := json.Marshal(resp)
-		fmt.Fprintln(os.Stdout, string(out))
-	}
-}
-
-func handleRequest(req jsonRPCRequest) jsonRPCResponse {
-	switch req.Method {
-	case "initialize":
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities":   map[string]any{"tools": map[string]any{}},
-				"serverInfo":     map[string]any{"name": "mock-tool-server", "version": "1.0.0"},
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "shell_exec",
+		Description: "Execute a shell command",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ShellInput) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: fmt.Sprintf("executed: %s", input.Command)},
 			},
-		}
+		}, nil, nil
+	})
 
-	case "tools/list":
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]any{
-				"tools": []map[string]any{
-					{
-						"name":        "shell_exec",
-						"description": "Execute a shell command",
-						"inputSchema": map[string]any{
-							"type":       "object",
-							"properties": map[string]any{"command": map[string]any{"type": "string"}},
-							"required":   []string{"command"},
-						},
-					},
-					{
-						"name":        "file_read",
-						"description": "Read a file",
-						"inputSchema": map[string]any{
-							"type":       "object",
-							"properties": map[string]any{"path": map[string]any{"type": "string"}},
-							"required":   []string{"path"},
-						},
-					},
-				},
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "file_read",
+		Description: "Read a file",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input FileInput) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: fmt.Sprintf("contents of: %s", input.Path)},
 			},
-		}
+		}, nil, nil
+	})
 
-	case "tools/call":
-		var params struct {
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return jsonRPCResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]any{
-					"content": []map[string]any{{"type": "text", "text": "parse error: " + err.Error()}},
-					"isError": true,
-				},
-			}
-		}
-
-		var text string
-		switch params.Name {
-		case "shell_exec":
-			cmd, _ := params.Arguments["command"].(string)
-			text = "executed: " + cmd
-		case "file_read":
-			path, _ := params.Arguments["path"].(string)
-			text = "contents of: " + path
-		default:
-			text = "unknown tool: " + params.Name
-		}
-
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]any{
-				"content": []map[string]any{{"type": "text", "text": text}},
-			},
-		}
-
-	default:
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]any{
-				"error": "unsupported method: " + req.Method,
-			},
-		}
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatal(err)
 	}
 }
