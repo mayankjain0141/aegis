@@ -11,7 +11,7 @@ import (
 const CreateSchema = `
 CREATE TABLE IF NOT EXISTS traces (
     id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    session_id      UUID NOT NULL,
+    session_id      UUID,
     request_id      TEXT NOT NULL,
     agent_id        TEXT NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL DEFAULT now(),

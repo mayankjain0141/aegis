@@ -202,6 +202,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) Shutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if d.httpServer != nil {
+		_ = d.httpServer.Shutdown(ctx)
+	}
 	if d.collector != nil {
 		_ = d.collector.Close()
 	}

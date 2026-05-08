@@ -197,8 +197,9 @@ func (bc *BatchCollector) writeToPG(batch []*TraceEvent) error {
 		if ev.ErrorCode != nil {
 			errCode = ev.ErrorCode
 		}
+		sessionID := nilIfEmpty(ev.SessionID)
 		_, err := tx.Exec(ctx, insertSQL,
-			ev.SessionID, ev.RequestID, ev.AgentID, ev.Timestamp, ev.Tool,
+			sessionID, ev.RequestID, ev.AgentID, ev.Timestamp, ev.Tool,
 			ev.ArgsHash, ev.ArgsSummary, ev.RiskScore, ev.Decision,
 			ev.PolicyID, ev.PolicyVersion, ev.Mode, ev.LatencyMs,
 			errCode, nilIfEmpty(ev.Error), nil,

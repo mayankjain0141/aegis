@@ -5,8 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"crypto/rand"
-	"encoding/hex"
+	"github.com/google/uuid"
 )
 
 // Registry manages active shim sessions.
@@ -61,7 +60,5 @@ func (r *Registry) Count() int {
 }
 
 func generateSessionID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	return uuid.New().String()
 }
