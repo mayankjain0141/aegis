@@ -141,6 +141,18 @@ def load_attacks():
 
 def run_all_attacks():
     """Run all attack categories, collect results."""
+    import socket
+
+    sock_path = "/tmp/aegis.sock"
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(sock_path)
+        s.close()
+    except (socket.error, FileNotFoundError, OSError):
+        print("ERROR: aegis-daemon not running. Start with: bin/aegis-daemon --policies policies/default.yaml")
+        sys.exit(1)
+
     categories = load_attacks()
     report = []
 

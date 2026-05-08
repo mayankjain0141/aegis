@@ -32,7 +32,7 @@ type Daemon struct {
 	hub              *ws.Hub
 	httpServer       *http.Server
 	httpPort         int
-	metrics          Metrics
+	metrics          *Metrics
 	startTime        time.Time
 	reloadCancel     context.CancelFunc
 }
@@ -118,7 +118,8 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 	}
 
 	collector := trace.NewBatchCollector(db, logger)
-	router := NewRouter(executor, policyEval, scorer, logger)
+	metrics := &Metrics{}
+	router := NewRouter(executor, policyEval, scorer, metrics, logger)
 	router.SetCollector(collector)
 
 	hub := ws.NewHub()
@@ -134,6 +135,7 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 		db:           db,
 		logger:       logger,
 		hub:          hub,
+		metrics:      metrics,
 		startTime:    time.Now(),
 		reloadCancel: reloadCancel,
 	}
@@ -201,6 +203,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	hubCancel()
 	<-d.hub.Done()
 	d.drainConnections()
+	d.Shutdown()
 	os.Remove(d.socketPath)
 	d.logger.Info("daemon stopped")
 	return nil
@@ -224,7 +227,7 @@ func (d *Daemon) Shutdown() error {
 		d.db.Close()
 	}
 	if d.listener != nil {
-		return d.listener.Close()
+		_ = d.listener.Close()
 	}
 	return nil
 }
@@ -234,6 +237,14 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	d.logger.Debug("connection accepted", "remote", conn.RemoteAddr())
+
+	var registeredShimID string
+	defer func() {
+		if registeredShimID != "" {
+			d.router.Sessions().Deregister(registeredShimID)
+			d.logger.Debug("session deregistered on disconnect", "shim_id", registeredShimID)
+		}
+	}()
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
@@ -252,6 +263,10 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		}
 
 		conn.SetReadDeadline(time.Time{})
+
+		if env.Type == "register" && env.ShimID != "" {
+			registeredShimID = env.ShimID
+		}
 
 		resp, err := d.router.HandleEnvelope(conn, env)
 		if err != nil {

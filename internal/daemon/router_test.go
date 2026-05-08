@@ -68,7 +68,7 @@ func testRouter(t *testing.T) *Router {
 		"shell-mcp": {Command: "echo", Args: []string{"mock"}},
 	}
 	exec := NewExecutor(tools, testLogger())
-	return NewRouter(exec, testPolicyEvaluator(t), testRiskScorer(), testLogger())
+	return NewRouter(exec, testPolicyEvaluator(t), testRiskScorer(), &Metrics{}, testLogger())
 }
 
 func TestRouter_Register(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	maxMessageSize = 256 * 1024 * 1024 // 256MB
-	headerSize     = 4                  // uint32 big-endian
+	maxMessageSize = 16 * 1024 * 1024 // 16MB
+	headerSize     = 4                 // uint32 big-endian
 )
 
 // WriteEnvelope marshals an AegisEnvelope to JSON and writes it with

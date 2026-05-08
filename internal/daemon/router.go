@@ -24,16 +24,18 @@ type Router struct {
 	riskScorer      *risk.CompositeScorer
 	collector       trace.Collector
 	approvalGate    *approval.Gate
+	metrics         *Metrics
 	logger          *slog.Logger
 	onTrace         func([]byte) // called after each trace emit with JSON
 }
 
-func NewRouter(executor *Executor, policyEval policy.PolicyEvaluator, riskScorer *risk.CompositeScorer, logger *slog.Logger) *Router {
+func NewRouter(executor *Executor, policyEval policy.PolicyEvaluator, riskScorer *risk.CompositeScorer, metrics *Metrics, logger *slog.Logger) *Router {
 	return &Router{
 		sessions:        session.NewRegistry(),
 		executor:        executor,
 		policyEvaluator: policyEval,
 		riskScorer:      riskScorer,
+		metrics:         metrics,
 		logger:          logger,
 	}
 }
@@ -111,6 +113,8 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		}, nil
 	}
 
+	r.metrics.CallsTotal.Add(1)
+
 	r.logger.Info("mcp_request received",
 		"shim_id", env.ShimID,
 		"request_id", env.RequestID,
@@ -167,6 +171,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 
 	switch decision.Action {
 	case policy.ActionDeny:
+		r.metrics.DeniedTotal.Add(1)
 		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
 		reason := fmt.Sprintf("Blocked by Aegis: %s", decision.Reason)
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
@@ -179,6 +184,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		}, nil
 
 	case policy.ActionThrottle:
+		r.metrics.DeniedTotal.Add(1)
 		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
 		reason := fmt.Sprintf("Blocked by Aegis: rate limited (%s)", decision.Reason)
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
