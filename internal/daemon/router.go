@@ -70,6 +70,8 @@ func (r *Router) HandleEnvelope(conn net.Conn, env *ipc.AegisEnvelope) (*ipc.Aeg
 		return r.handleRegister(env)
 	case "mcp_request":
 		return r.handleMCPRequest(env)
+	case "evaluate":
+		return r.handleEvaluate(env)
 	case "cancel":
 		return r.handleCancel(env)
 	default:
@@ -305,6 +307,181 @@ func (r *Router) emitTrace(env *ipc.AegisEnvelope, toolName string, riskScore fl
 		if data, jsonErr := json.Marshal(ev); jsonErr == nil {
 			r.onTrace(data)
 		}
+	}
+}
+
+func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, error) {
+	sess, ok := r.sessions.Get(env.ShimID)
+	if !ok {
+		return &ipc.AegisEnvelope{
+			Type:   "error",
+			ShimID: env.ShimID,
+			Error:  "shim not registered; send register first",
+		}, nil
+	}
+
+	r.metrics.CallsTotal.Add(1)
+
+	start := time.Now()
+
+	toolName, args := extractToolCall(env.MCPMessage)
+	argsJSON, _ := json.Marshal(args)
+
+	sessCtx := sess.GetContext()
+	riskScore := r.riskScorer.Score(context.Background(), toolName, string(argsJSON), sessCtx.CallsLastMinute)
+
+	policyReq := &policy.ToolCallRequest{
+		AgentID:   env.AgentID,
+		Tool:      toolName,
+		Arguments: string(argsJSON),
+		RequestID: env.RequestID,
+		SessionCtx: &policy.SessionContext{
+			CallsLastMinute: sessCtx.CallsLastMinute,
+			CallsLastHour:   sessCtx.CallsLastHour,
+			RecentTools:     sessCtx.RecentTools,
+			SessionStarted:  sessCtx.SessionStarted.Format(time.RFC3339),
+		},
+	}
+
+	decision, err := r.policyEvaluator.Evaluate(context.Background(), policyReq)
+	latency := time.Since(start)
+
+	if err != nil {
+		r.logger.Error("policy evaluation error", "error", err, "tool", toolName)
+		r.emitTrace(env, toolName, riskScore, "error", nil, latency, err)
+		return &ipc.AegisEnvelope{
+			Type:      "evaluation",
+			ShimID:    env.ShimID,
+			RequestID: env.RequestID,
+			Evaluation: &ipc.EvaluationResult{
+				Action:      "deny",
+				RiskScore:   riskScore,
+				Reason:      "internal policy error",
+				DenyMessage: "Aegis internal: policy evaluation failed, action denied for safety",
+			},
+		}, nil
+	}
+
+	r.logger.Info("policy decision",
+		"tool", toolName,
+		"risk_score", riskScore,
+		"decision", decision.Action,
+		"policy_name", decision.PolicyName,
+		"latency_us", latency.Microseconds(),
+	)
+
+	sess.RecordCall(toolName, riskScore, string(decision.Action))
+
+	switch decision.Action {
+	case policy.ActionDeny:
+		r.metrics.DeniedTotal.Add(1)
+		r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil)
+		return &ipc.AegisEnvelope{
+			Type:      "evaluation",
+			ShimID:    env.ShimID,
+			RequestID: env.RequestID,
+			Evaluation: &ipc.EvaluationResult{
+				Action:      "deny",
+				Policy:      decision.PolicyName,
+				RiskScore:   riskScore,
+				Reason:      decision.Reason,
+				DenyMessage: fmt.Sprintf("Blocked by Aegis policy '%s': %s", decision.PolicyName, decision.Reason),
+			},
+		}, nil
+
+	case policy.ActionThrottle:
+		r.metrics.DeniedTotal.Add(1)
+		r.emitTrace(env, toolName, riskScore, "throttle", decision, latency, nil)
+		return &ipc.AegisEnvelope{
+			Type:      "evaluation",
+			ShimID:    env.ShimID,
+			RequestID: env.RequestID,
+			Evaluation: &ipc.EvaluationResult{
+				Action:      "deny",
+				Policy:      decision.PolicyName,
+				RiskScore:   riskScore,
+				Reason:      decision.Reason,
+				DenyMessage: fmt.Sprintf("Blocked by Aegis: rate limited (%s)", decision.Reason),
+			},
+		}, nil
+
+	case policy.ActionEscalateHuman:
+		if r.approvalGate == nil {
+			r.emitTrace(env, toolName, riskScore, "escalate", decision, latency, nil)
+			return &ipc.AegisEnvelope{
+				Type:      "evaluation",
+				ShimID:    env.ShimID,
+				RequestID: env.RequestID,
+				Evaluation: &ipc.EvaluationResult{
+					Action:      "deny",
+					Policy:      decision.PolicyName,
+					RiskScore:   riskScore,
+					Reason:      "human approval not configured",
+					DenyMessage: "Blocked by Aegis: human approval gate not available",
+				},
+			}, nil
+		}
+
+		pa := &approval.PendingApproval{
+			RequestID:   env.RequestID,
+			AgentID:     env.AgentID,
+			Tool:        toolName,
+			ArgsSummary: string(argsJSON),
+			RiskScore:   riskScore,
+		}
+
+		approvalResp, escalateErr := r.approvalGate.Escalate(context.Background(), pa)
+		latency = time.Since(start)
+
+		if escalateErr != nil || approvalResp.Action != "approve" {
+			reason := "human denied"
+			if escalateErr != nil {
+				reason = escalateErr.Error()
+			} else if approvalResp.Reason != "" {
+				reason = approvalResp.Reason
+			}
+			r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil)
+			return &ipc.AegisEnvelope{
+				Type:      "evaluation",
+				ShimID:    env.ShimID,
+				RequestID: env.RequestID,
+				Evaluation: &ipc.EvaluationResult{
+					Action:      "deny",
+					Policy:      decision.PolicyName,
+					RiskScore:   riskScore,
+					Reason:      reason,
+					DenyMessage: fmt.Sprintf("Blocked by Aegis: %s", reason),
+				},
+			}, nil
+		}
+
+		r.emitTrace(env, toolName, riskScore, "approve", decision, latency, nil)
+		return &ipc.AegisEnvelope{
+			Type:      "evaluation",
+			ShimID:    env.ShimID,
+			RequestID: env.RequestID,
+			Evaluation: &ipc.EvaluationResult{
+				Action:    "allow",
+				Policy:    decision.PolicyName,
+				RiskScore: riskScore,
+				Reason:    "approved by human",
+			},
+		}, nil
+
+	default:
+		// ActionAllow
+		r.emitTrace(env, toolName, riskScore, "allow", decision, latency, nil)
+		return &ipc.AegisEnvelope{
+			Type:      "evaluation",
+			ShimID:    env.ShimID,
+			RequestID: env.RequestID,
+			Evaluation: &ipc.EvaluationResult{
+				Action:    "allow",
+				Policy:    decision.PolicyName,
+				RiskScore: riskScore,
+				Reason:    decision.Reason,
+			},
+		}, nil
 	}
 }
 

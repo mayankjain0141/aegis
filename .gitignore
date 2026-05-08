@@ -12,5 +12,4 @@ __pycache__/
 .venv/
 .planning/
 temp/
-claude-code-main/
 docs/
