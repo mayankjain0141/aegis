@@ -39,9 +39,107 @@ except ImportError:
     sys.exit(1)
 
 SHIM_BIN = os.environ.get("AEGIS_SHIM_BIN", "./bin/aegis-shim")
-TOOL_NAME = "shell-mcp"
+MOCK_TOOL = os.environ.get("AEGIS_MOCK_TOOL", "./bin/mock-tool")
 AGENT_ID = "demo-agent"
 SOCKET = os.environ.get("AEGIS_SOCKET", "/tmp/aegis.sock")
+POLICY_PATH = os.environ.get("AEGIS_POLICY_PATH", "policies/default.yaml")
+
+
+class AegisShimConnection:
+    """Manages a persistent connection to aegis-shim as an MCP client."""
+
+    def __init__(self):
+        self.proc = None
+        self._id_counter = 0
+
+    def start(self):
+        """Start the shim subprocess and initialize MCP session."""
+        cmd = [SHIM_BIN, "--agent-id", AGENT_ID, "--policies", POLICY_PATH]
+        if SOCKET and os.path.exists(SOCKET):
+            cmd.extend(["--socket", SOCKET])
+        cmd.extend(["--", MOCK_TOOL])
+
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        # Send initialize
+        self._send({"jsonrpc": "2.0", "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "aegis-demo-agent", "version": "1.0"}
+        }, "id": self._next_id()})
+
+        # Read initialize response
+        resp = self._recv()
+        if not resp or "result" not in resp:
+            raise RuntimeError(f"Initialize failed: {resp}")
+
+        # Send initialized notification
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+
+    def call_tool(self, tool_name: str, arguments: dict) -> dict:
+        """Call a tool through the shim and return the result."""
+        req_id = self._next_id()
+        self._send({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+            "id": req_id,
+        })
+
+        resp = self._recv()
+        if not resp:
+            return {"is_error": True, "content": "No response from shim"}
+
+        result = resp.get("result", {})
+        if result.get("isError"):
+            content = result.get("content", [{}])
+            text = content[0].get("text", "Blocked by Aegis") if content else "Blocked"
+            return {"is_error": True, "content": text}
+
+        content = result.get("content", [{}])
+        text = content[0].get("text", "OK") if content else "OK"
+        return {"is_error": False, "content": text}
+
+    def close(self):
+        if self.proc:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=5)
+
+    def _next_id(self):
+        self._id_counter += 1
+        return self._id_counter
+
+    def _send(self, msg):
+        line = json.dumps(msg) + "\n"
+        self.proc.stdin.write(line)
+        self.proc.stdin.flush()
+
+    def _recv(self):
+        line = self.proc.stdout.readline()
+        if not line:
+            return None
+        try:
+            return json.loads(line.strip())
+        except json.JSONDecodeError:
+            return None
+
+
+# Global shim connection
+_shim = None
+
+
+def get_shim() -> AegisShimConnection:
+    global _shim
+    if _shim is None:
+        _shim = AegisShimConnection()
+        _shim.start()
+    return _shim
 MODEL = os.environ.get("AEGIS_MODEL", "anthropic/claude-sonnet-4-6")
 
 api_key = os.environ.get("LITELLM_API_KEY")
@@ -82,44 +180,12 @@ TOOLS = [
 
 
 def call_tool_via_aegis(tool_name: str, arguments: dict) -> dict:
-    """Send tool call through aegis-shim, return result."""
-    mcp_request = json.dumps({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments},
-        "id": 1,
-    })
-
+    """Send tool call through aegis-shim MCP proxy, return result."""
     try:
-        proc = subprocess.run(
-            [SHIM_BIN, "--tool", TOOL_NAME, "--agent-id", AGENT_ID, "--socket", SOCKET],
-            input=mcp_request,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        return {"is_error": True, "content": "Aegis: tool call timed out (30s)"}
-    except FileNotFoundError:
-        return {"is_error": True, "content": f"Aegis: shim not found at {SHIM_BIN}. Run 'make build' first."}
-
-    if proc.returncode != 0:
-        return {"is_error": True, "content": f"Aegis error: {proc.stderr.strip() or 'shim failed'}"}
-
-    try:
-        response = json.loads(proc.stdout.strip())
-        result = response.get("result", response)
-
-        if isinstance(result, dict) and result.get("isError"):
-            content_blocks = result.get("content", [])
-            text = content_blocks[0]["text"] if content_blocks else "Blocked by Aegis"
-            return {"is_error": True, "content": text}
-
-        content_blocks = result.get("content", [])
-        text = content_blocks[0]["text"] if content_blocks else "OK"
-        return {"is_error": False, "content": text}
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        return {"is_error": False, "content": proc.stdout.strip() or "OK"}
+        shim = get_shim()
+        return shim.call_tool(tool_name, arguments)
+    except Exception as e:
+        return {"is_error": True, "content": f"Aegis error: {e}"}
 
 
 def run_agent(prompt: str):
@@ -187,4 +253,8 @@ if __name__ == "__main__":
         "Also try running 'rm -rf /tmp' to clean up temporary files."
     )
     prompt = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else default_prompt
-    run_agent(prompt)
+    try:
+        run_agent(prompt)
+    finally:
+        if _shim:
+            _shim.close()

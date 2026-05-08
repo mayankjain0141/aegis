@@ -4,9 +4,6 @@ set -e
 [ -f .env ] && source .env
 
 make build 2>/dev/null
-
-bin/aegis-daemon --policies policies/default.yaml &>/dev/null &
-trap "kill $! 2>/dev/null" EXIT
-sleep 1
+go build -o bin/mock-tool ./test/mock 2>/dev/null
 
 python3 agent/runner.py "$@"
