@@ -22,6 +22,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const (
+	toolExecTimeout = 5 * time.Minute
+	daemonEvalTimeout = 30 * time.Second
+	toolShutdownGrace = 3 * time.Second
+)
+
 func main() {
 	agentID := flag.String("agent-id", "", "Agent identity (required)")
 	policyPath := flag.String("policies", "", "Policy YAML file path")
@@ -61,14 +67,20 @@ func main() {
 	}
 
 	cmd := exec.Command(toolCmd[0], toolCmd[1:]...)
-	cmd.Stderr = os.Stderr
-	// Set process group so we can kill the tool AND all its children
+	cmd.Stderr = io.Discard // tool stderr separated from shim logs
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	defer func() {
 		if cmd.Process != nil {
-			// Kill entire process group (tool + any children it spawned)
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			cmd.Wait()
+			// Graceful: SIGTERM first, then SIGKILL after grace period
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(toolShutdownGrace):
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				<-done
+			}
 		}
 	}()
 
@@ -88,37 +100,74 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "aegis-proxy", Version: "0.1.0"}, &mcp.ServerOptions{
-		Logger: logger,
-	})
+	server := mcp.NewServer(&mcp.Implementation{Name: "aegis-proxy", Version: "0.1.0"}, nil)
+
+	proxyState := &proxyState{
+		daemonConn:  &daemonConn,
+		daemonMu:    &daemonMu,
+		daemonDone:  daemonDone,
+		pending:     &pending,
+		localEval:   localEvaluator,
+		localScorer: localScorer,
+		shimID:      shimID,
+		agentID:     *agentID,
+		logger:      logger,
+		toolSession: toolSession,
+	}
 
 	for _, tool := range toolsResult.Tools {
-		registerProxyTool(server, tool, toolSession, &daemonConn, &daemonMu, daemonDone, &pending, localEvaluator, localScorer, shimID, *agentID, logger)
+		registerProxyTool(server, tool, proxyState)
 	}
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		logger.Error("server exited", "error", err)
-		os.Exit(1)
 	}
 }
 
-func registerProxyTool(server *mcp.Server, tool *mcp.Tool, toolSession *mcp.ClientSession,
-	daemonConn *net.Conn, daemonMu *sync.Mutex, daemonDone chan struct{}, pending *sync.Map,
-	localEval policy.PolicyEvaluator, localScorer *risk.CompositeScorer,
-	shimID, agentID string, logger *slog.Logger) {
+// proxyState holds shared state for all tool handlers, avoiding giant parameter lists.
+type proxyState struct {
+	daemonConn  *net.Conn
+	daemonMu    *sync.Mutex
+	daemonDone  chan struct{}
+	pending     *sync.Map
+	localEval   policy.PolicyEvaluator
+	localScorer *risk.CompositeScorer
+	shimID      string
+	agentID     string
+	logger      *slog.Logger
+	toolSession *mcp.ClientSession
+}
 
+func registerProxyTool(server *mcp.Server, tool *mcp.Tool, ps *proxyState) {
 	toolName := tool.Name
 
-	handler := func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	handler := func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
+		// Panic recovery — never crash the shim from a handler
+		defer func() {
+			if r := recover(); r != nil {
+				ps.logger.Error("handler panic recovered", "tool", toolName, "panic", fmt.Sprint(r))
+				result = &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{
+						&mcp.TextContent{Text: "Aegis internal error: handler panic recovered"},
+					},
+				}
+				err = nil
+			}
+		}()
+
 		argsJSON := string(req.Params.Arguments)
 
-		daemonMu.Lock()
-		conn := *daemonConn
-		daemonMu.Unlock()
+		// Get daemon connection (may be nil)
+		ps.daemonMu.Lock()
+		conn := *ps.daemonConn
+		ps.daemonMu.Unlock()
 
-		decision := evaluate(ctx, conn, daemonMu, daemonDone, pending, localEval, localScorer, toolName, argsJSON, shimID, agentID, logger)
+		decision := evaluate(ctx, conn, ps.daemonMu, ps.daemonDone, ps.pending,
+			ps.localEval, ps.localScorer, toolName, argsJSON, ps.shimID, ps.agentID, ps.logger)
 
 		if decision.Action == "deny" {
+			ps.logger.Info("tool_denied", "tool", toolName, "policy", decision.Policy, "risk", decision.RiskScore)
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -127,11 +176,19 @@ func registerProxyTool(server *mcp.Server, tool *mcp.Tool, toolSession *mcp.Clie
 			}, nil
 		}
 
-		result, err := toolSession.CallTool(ctx, &mcp.CallToolParams{
+		// Log allowed calls for standalone observability
+		ps.logger.Info("tool_allowed", "tool", toolName, "policy", decision.Policy, "risk", decision.RiskScore)
+
+		// Forward to real tool with timeout
+		toolCtx, toolCancel := context.WithTimeout(ctx, toolExecTimeout)
+		defer toolCancel()
+
+		result, err = ps.toolSession.CallTool(toolCtx, &mcp.CallToolParams{
 			Name:      toolName,
 			Arguments: req.Params.Arguments,
 		})
 		if err != nil {
+			ps.logger.Error("tool_exec_failed", "tool", toolName, "error", err)
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -164,30 +221,25 @@ func setupLogger(level string) *slog.Logger {
 
 func loadLocalPolicy(path string, logger *slog.Logger) policy.PolicyEvaluator {
 	if path == "" {
-		rules := []policy.CompiledRule{}
-		return policy.NewStaticEvaluator(rules, "default", policy.ActionDeny)
+		return policy.NewStaticEvaluator(nil, "default", policy.ActionDeny)
 	}
 	eval, err := policy.LoadFromFile(path)
 	if err != nil {
 		logger.Error("failed to load policy, using default-deny", "path", path, "error", err)
-		rules := []policy.CompiledRule{}
-		return policy.NewStaticEvaluator(rules, "default", policy.ActionDeny)
+		return policy.NewStaticEvaluator(nil, "default", policy.ActionDeny)
 	}
 	return eval
 }
 
 func createLocalScorer() *risk.CompositeScorer {
-	signals := []risk.RiskSignal{
-		risk.ToolClassificationSignal{},
-		risk.ArgPatternSignal{},
-		risk.RateSignal{},
-	}
-	weights := map[string]float64{
-		"tool_class":  1.0,
-		"arg_pattern": 1.0,
-		"rate":        1.0,
-	}
-	return risk.NewCompositeScorer(signals, weights)
+	return risk.NewCompositeScorer(
+		[]risk.RiskSignal{
+			risk.ToolClassificationSignal{},
+			risk.ArgPatternSignal{},
+			risk.RateSignal{},
+		},
+		map[string]float64{"tool_class": 1.0, "arg_pattern": 1.0, "rate": 1.0},
+	)
 }
 
 func connectAndRegister(socketPath, shimID, agentID string, pending *sync.Map, logger *slog.Logger) (net.Conn, chan struct{}, error) {
@@ -253,7 +305,7 @@ func evaluate(ctx context.Context, daemonConn net.Conn, daemonMu *sync.Mutex, da
 		logger.Warn("daemon eval failed, falling back to local", "error", err)
 	}
 
-	return evaluateLocally(localEval, localScorer, toolName, argsJSON, agentID)
+	return evaluateLocally(ctx, localEval, localScorer, toolName, argsJSON, agentID)
 }
 
 func evaluateViaDaemon(ctx context.Context, conn net.Conn, mu *sync.Mutex, done chan struct{}, pending *sync.Map,
@@ -280,10 +332,11 @@ func evaluateViaDaemon(ctx context.Context, conn net.Conn, mu *sync.Mutex, done 
 		return nil, fmt.Errorf("send evaluate: %w", err)
 	}
 
-	timeout := 30 * time.Second
-	deadline, ok := ctx.Deadline()
-	if ok && time.Until(deadline) < timeout {
-		timeout = time.Until(deadline)
+	timeout := daemonEvalTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -309,7 +362,7 @@ func evaluateViaDaemon(ctx context.Context, conn net.Conn, mu *sync.Mutex, done 
 	}
 }
 
-func evaluateLocally(localEval policy.PolicyEvaluator, scorer *risk.CompositeScorer,
+func evaluateLocally(ctx context.Context, localEval policy.PolicyEvaluator, scorer *risk.CompositeScorer,
 	toolName, argsJSON, agentID string) *ipc.EvaluationResult {
 
 	req := &policy.ToolCallRequest{
@@ -318,7 +371,7 @@ func evaluateLocally(localEval policy.PolicyEvaluator, scorer *risk.CompositeSco
 		Arguments: argsJSON,
 	}
 
-	decision, err := localEval.Evaluate(context.Background(), req)
+	decision, err := localEval.Evaluate(ctx, req)
 	if err != nil {
 		return &ipc.EvaluationResult{
 			Action:      "deny",
@@ -327,10 +380,9 @@ func evaluateLocally(localEval policy.PolicyEvaluator, scorer *risk.CompositeSco
 		}
 	}
 
-	riskScore := scorer.Score(context.Background(), toolName, argsJSON, 0)
+	riskScore := scorer.Score(ctx, toolName, argsJSON, 0)
 
 	result := &ipc.EvaluationResult{
-		Action:    string(decision.Action),
 		Policy:    decision.PolicyName,
 		RiskScore: riskScore,
 		Reason:    decision.Reason,
