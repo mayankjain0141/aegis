@@ -50,10 +50,9 @@ for line in sys.stdin:
 
 echo ""
 echo "━━━ Running full attack suite ━━━"
-rm -f /tmp/aegis.sock
 bin/aegis-daemon --policies policies/default.yaml --http-port 0 &>/dev/null &
 DAEMON_PID=$!
-trap "kill $DAEMON_PID 2>/dev/null; rm -f /tmp/aegis.sock" EXIT
+trap "kill $DAEMON_PID 2>/dev/null; wait $DAEMON_PID 2>/dev/null" EXIT
 sleep 1
 python3 agent/harness.py
 

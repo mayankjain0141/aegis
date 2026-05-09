@@ -166,6 +166,7 @@ func (d *Daemon) Router() *Router {
 
 // Run starts accepting connections and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
+	// Remove stale socket from a previous crashed run (or SIGKILL).
 	os.Remove(d.socketPath)
 
 	var err error
@@ -173,9 +174,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Guarantee socket removal regardless of how we exit (panic, early return, etc.)
+	defer os.Remove(d.socketPath)
 
 	// Start WebSocket hub
 	hubCtx, hubCancel := context.WithCancel(ctx)
+	defer hubCancel()
 	go d.hub.Run(hubCtx)
 
 	// Start HTTP server if port is configured (non-fatal — daemon works without it)
@@ -207,11 +211,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		go d.handleConn(ctx, conn)
 	}
 
-	hubCancel()
 	<-d.hub.Done()
 	d.drainConnections()
 	d.Shutdown()
-	os.Remove(d.socketPath)
 	d.logger.Info("daemon stopped")
 	return nil
 }
