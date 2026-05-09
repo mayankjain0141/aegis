@@ -28,26 +28,27 @@ func (d *Daemon) startHTTP(ctx context.Context, addr string) error {
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
 	mux.HandleFunc("GET /ws", d.handleWS)
 
-	d.httpServer = &http.Server{
-		Handler:     mux,
-		BaseContext: func(_ net.Listener) context.Context { return ctx },
-	}
-
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("http listen %s: %w", addr, err)
 	}
+
+	srv := &http.Server{
+		Handler:     mux,
+		BaseContext: func(_ net.Listener) context.Context { return ctx },
+	}
+	d.httpServer = srv
 	d.logger.Info("http server started", "addr", addr)
 
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		d.httpServer.Shutdown(shutCtx)
+		srv.Shutdown(shutCtx)
 	}()
 
 	go func() {
-		if err := d.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			d.logger.Error("http server error", "error", err)
 		}
 	}()
