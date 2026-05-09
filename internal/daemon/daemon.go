@@ -170,12 +170,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	hubCtx, hubCancel := context.WithCancel(ctx)
 	go d.hub.Run(hubCtx)
 
-	// Start HTTP server if port is configured
+	// Start HTTP server if port is configured (non-fatal — daemon works without it)
 	if d.httpPort > 0 {
 		addr := fmt.Sprintf(":%d", d.httpPort)
 		if err := d.startHTTP(ctx, addr); err != nil {
-			hubCancel()
-			return err
+			d.logger.Warn("http server failed to start (dashboard unavailable)", "addr", addr, "error", err)
 		}
 	}
 
