@@ -35,6 +35,7 @@ type Daemon struct {
 	metrics          *Metrics
 	startTime        time.Time
 	reloadCancel     context.CancelFunc
+	shutdownOnce     sync.Once
 }
 
 func New(socketPath string, configPath string, logger *slog.Logger) *Daemon {
@@ -209,25 +210,27 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) Shutdown() error {
-	if d.reloadCancel != nil {
-		d.reloadCancel()
-	}
+	d.shutdownOnce.Do(func() {
+		if d.reloadCancel != nil {
+			d.reloadCancel()
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	if d.httpServer != nil {
-		_ = d.httpServer.Shutdown(ctx)
-	}
-	if d.collector != nil {
-		_ = d.collector.Close()
-	}
-	if d.db != nil {
-		d.db.Close()
-	}
-	if d.listener != nil {
-		_ = d.listener.Close()
-	}
+		if d.httpServer != nil {
+			_ = d.httpServer.Shutdown(ctx)
+		}
+		if d.collector != nil {
+			_ = d.collector.Close()
+		}
+		if d.db != nil {
+			d.db.Close()
+		}
+		if d.listener != nil {
+			_ = d.listener.Close()
+		}
+	})
 	return nil
 }
 
