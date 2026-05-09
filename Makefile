@@ -1,9 +1,11 @@
 .PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello
 
 build:
-	go build -o bin/aegis-daemon ./cmd/daemon
-	go build -o bin/aegis-shim ./cmd/shim
-	go build -o bin/aegis-watch ./cmd/watch
+	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
+	go build -buildvcs=false -o bin/aegis-shim ./cmd/shim
+	go build -buildvcs=false -o bin/aegis-watch ./cmd/watch
+	go build -buildvcs=false -o bin/mock-tool ./test/mock
+	go build -buildvcs=false -o bin/aegis-real-tool ./cmd/real-tool
 
 install:
 	go install ./cmd/daemon

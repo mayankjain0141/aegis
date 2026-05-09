@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Aegis Attack Simulator — LLM-free policy enforcement testing.
-Sends MCP tool calls directly through aegis-shim, verifies policy decisions.
+Aegis Attack Simulator — Direct daemon IPC testing.
+Connects to the aegis-daemon Unix socket, sends evaluate envelopes,
+and verifies policy enforcement without needing the MCP shim.
 """
-import subprocess
+import socket
+import struct
 import json
 import sys
 import time
 import os
+import uuid
 
-SHIM_CMD = [
-    "./bin/aegis-shim",
-    "--tool", "shell-mcp",
-    "--agent-id", "attacker",
-    "--socket", "/tmp/aegis.sock",
-]
+
+SOCKET_PATH = "/tmp/aegis.sock"
 
 
 class AttackResult:
@@ -26,97 +25,105 @@ class AttackResult:
         self.latency_ms = latency_ms
 
 
-def run_attack(tool, args, description, request_id=1):
-    """Pipe a single MCP JSON-RPC call through the shim and check the response."""
-    mcp_request = json.dumps({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "params": {"name": tool, "arguments": args},
-        "id": request_id,
-    })
+def connect_daemon(socket_path=SOCKET_PATH):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(socket_path)
+    return sock
 
+
+def send_envelope(sock, envelope):
+    data = json.dumps(envelope).encode()
+    sock.sendall(struct.pack(">I", len(data)) + data)
+
+
+def recv_envelope(sock):
+    length_bytes = b""
+    while len(length_bytes) < 4:
+        chunk = sock.recv(4 - len(length_bytes))
+        if not chunk:
+            return None
+        length_bytes += chunk
+    length = struct.unpack(">I", length_bytes)[0]
+    data = b""
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return json.loads(data)
+
+
+def register(sock, shim_id="attacker-harness", agent_id="attacker"):
+    send_envelope(sock, {
+        "type": "register",
+        "shim_id": shim_id,
+        "agent_id": agent_id,
+    })
+    resp = recv_envelope(sock)
+    if resp is None or resp.get("type") != "registered":
+        raise RuntimeError(f"Registration failed: {resp}")
+    return resp
+
+
+def evaluate_tool(sock, tool_name, args, shim_id="attacker-harness", agent_id="attacker"):
+    request_id = str(uuid.uuid4())
+    send_envelope(sock, {
+        "type": "evaluate",
+        "shim_id": shim_id,
+        "agent_id": agent_id,
+        "tool_name": tool_name,
+        "request_id": request_id,
+        "mcp_message": args,
+    })
+    return recv_envelope(sock)
+
+
+def run_attack(sock, tool, args, description):
     start = time.time()
     try:
-        proc = subprocess.run(
-            SHIM_CMD,
-            input=mcp_request + "\n",
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        resp = evaluate_tool(sock, tool, args)
         latency_ms = (time.time() - start) * 1000
-        stdout = proc.stdout.strip()
 
-        if not stdout:
-            return AttackResult(description, "", False, "(empty response)", latency_ms)
+        if resp is None:
+            return AttackResult(description, "", False, "(no response)", latency_ms)
 
-        resp = json.loads(stdout)
-        blocked = False
-        result = resp.get("result", {})
-        if isinstance(result, dict):
-            blocked = result.get("isError", False) is True
-        return AttackResult(description, "", blocked, stdout[:200], latency_ms)
+        evaluation = resp.get("evaluation")
+        if evaluation is None:
+            return AttackResult(description, "", False, json.dumps(resp)[:200], latency_ms)
 
-    except subprocess.TimeoutExpired:
-        latency_ms = (time.time() - start) * 1000
-        return AttackResult(description, "", True, "(timeout — likely blocked)", latency_ms)
-    except json.JSONDecodeError as e:
-        latency_ms = (time.time() - start) * 1000
-        return AttackResult(description, "", False, f"(json error: {e})", latency_ms)
+        blocked = evaluation.get("action") == "deny"
+        return AttackResult(description, "", blocked, json.dumps(resp)[:200], latency_ms)
+
     except Exception as e:
         latency_ms = (time.time() - start) * 1000
         return AttackResult(description, "", False, f"(error: {e})", latency_ms)
 
 
-def run_flood_attack(tool, args, description, count, start_request_id):
-    """Send many calls through a single shim process to test rate limiting."""
-    lines = []
-    for i in range(count):
-        mcp_request = json.dumps({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": args},
-            "id": start_request_id + i,
-        })
-        lines.append(mcp_request)
-
-    stdin_data = "\n".join(lines) + "\n"
-    start = time.time()
-
+def run_flood_attack(tool, args, description, count):
+    """Send many evaluate requests over a single connection to test rate limiting."""
+    results = []
+    flood_shim_id = f"flood-harness-{uuid.uuid4().hex[:8]}"
     try:
-        proc = subprocess.run(
-            SHIM_CMD,
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        latency_ms = (time.time() - start) * 1000
-        stdout_lines = [l for l in proc.stdout.strip().split("\n") if l.strip()]
-
-        results = []
-        for i, line in enumerate(stdout_lines):
-            try:
-                resp = json.loads(line)
-                blocked = False
-                result = resp.get("result", {})
-                if isinstance(result, dict):
-                    blocked = result.get("isError", False) is True
-                results.append(AttackResult(description, "", blocked, line[:100], latency_ms / max(len(stdout_lines), 1)))
-            except json.JSONDecodeError:
-                results.append(AttackResult(description, "", False, f"(parse error: {line[:50]})", 0))
-
-        # If we got fewer responses than sent, the rest were likely dropped/blocked
-        while len(results) < count:
-            results.append(AttackResult(description, "", True, "(no response — blocked)", 0))
-
-        return results
-
-    except subprocess.TimeoutExpired:
-        latency_ms = (time.time() - start) * 1000
-        return [AttackResult(description, "", True, "(timeout — flood blocked)", latency_ms)] * count
+        sock = connect_daemon()
+        register(sock, shim_id=flood_shim_id)
     except Exception as e:
-        return [AttackResult(description, "", False, f"(error: {e})", 0)] * count
+        return [AttackResult(description, "", True, f"(connection error: {e})", 0)] * count
+
+    for i in range(count):
+        start = time.time()
+        try:
+            resp = evaluate_tool(sock, tool, args, shim_id=flood_shim_id)
+            latency_ms = (time.time() - start) * 1000
+
+            if resp and resp.get("evaluation", {}).get("action") == "deny":
+                results.append(AttackResult(description, "", True, json.dumps(resp)[:100], latency_ms))
+            else:
+                results.append(AttackResult(description, "", False, json.dumps(resp)[:100] if resp else "(nil)", latency_ms))
+        except Exception as e:
+            results.append(AttackResult(description, "", True, f"(error: {e})", 0))
+
+    sock.close()
+    return results
 
 
 def load_attacks():
@@ -141,22 +148,17 @@ def load_attacks():
 
 def run_all_attacks():
     """Run all attack categories, collect results."""
-    import socket
-
-    sock_path = "/tmp/aegis.sock"
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(2)
-        s.connect(sock_path)
-        s.close()
-    except (socket.error, FileNotFoundError, OSError):
-        print("ERROR: aegis-daemon not running. Start with: bin/aegis-daemon --policies policies/default.yaml")
+        sock = connect_daemon()
+    except (socket.error, FileNotFoundError, OSError) as e:
+        print(f"ERROR: aegis-daemon not running ({e}). Start with: bin/aegis-daemon --policies policies/default.yaml")
         sys.exit(1)
+
+    register(sock)
 
     categories = load_attacks()
     report = []
 
-    request_id = 1
     for category_name, attacks in categories:
         cat_results = []
         for attack in attacks:
@@ -167,24 +169,22 @@ def run_all_attacks():
                     attack["args"],
                     attack["desc"],
                     count,
-                    request_id,
                 )
                 for r in results:
                     r.category = category_name
                 cat_results.extend(results)
-                request_id += count
             else:
                 result = run_attack(
+                    sock,
                     attack["tool"],
                     attack["args"],
                     attack["desc"],
-                    request_id,
                 )
                 result.category = category_name
                 cat_results.append(result)
-                request_id += 1
         report.append((category_name, cat_results))
 
+    sock.close()
     return report
 
 
@@ -222,7 +222,6 @@ def print_report(report):
     print("└──────────────────────────┴──────────┴──────────┴────────────┘")
     print()
 
-    # Print details of any attacks that were NOT blocked
     failures = [(cat, r) for cat, results in report for r in results if not r.blocked]
     if failures:
         print(f"⚠ {len(failures)} attack(s) were NOT blocked:")
@@ -234,15 +233,12 @@ def print_report(report):
 
 
 if __name__ == "__main__":
-    print("Aegis Attack Simulator v1.0")
+    print("Aegis Attack Simulator v2.0 (direct IPC)")
     print("=" * 40)
 
     report = run_all_attacks()
     total_attempts, total_blocked = print_report(report)
 
-    # For resource exhaustion, we expect at least some to be throttled
-    # (rate limit of 60/min means after 60 calls, the rest should be blocked)
-    # For everything else, we expect 100% blocked
     non_rate_failures = []
     for category_name, results in report:
         if category_name == "Resource Exhaustion":
