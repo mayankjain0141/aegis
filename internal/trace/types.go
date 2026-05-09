@@ -16,8 +16,10 @@ type TraceEvent struct {
 	Decision      string    `json:"decision"`
 	PolicyID      string    `json:"policy_id,omitempty"`
 	PolicyVersion string    `json:"policy_version,omitempty"`
+	Severity      string    `json:"severity,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
 	Mode          string    `json:"mode"` // "enforce" or "audit"
-	LatencyMs     int       `json:"latency_ms"`
+	LatencyUs     int       `json:"latency_us"`
 	ErrorCode     *int      `json:"error_code,omitempty"`
 	Error         string    `json:"error,omitempty"`
 }

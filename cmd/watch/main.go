@@ -36,7 +36,7 @@ type traceEvent struct {
 	Decision      string  `json:"decision"`
 	PolicyID      string  `json:"policy_id,omitempty"`
 	PolicyVersion string  `json:"policy_version,omitempty"`
-	LatencyMs     int     `json:"latency_ms"`
+	LatencyUs     int     `json:"latency_us"`
 	Error         string  `json:"error,omitempty"`
 }
 
@@ -176,7 +176,7 @@ func printTraceEvent(ev *traceEvent) {
 	decision := fmt.Sprintf("%s%s %-8s%s", decColor, decIcon, decLabel, colorReset)
 	risk := fmt.Sprintf("risk:%.2f", ev.RiskScore)
 
-	latency := fmt.Sprintf("%dms", ev.LatencyMs)
+	latency := fmt.Sprintf("%dμs", ev.LatencyUs)
 	if ev.Decision == "escalate" {
 		latency = "waiting..."
 	}

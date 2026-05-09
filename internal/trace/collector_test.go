@@ -22,7 +22,7 @@ func makeEvent(tool string) *TraceEvent {
 		RiskScore: 0.5,
 		Decision:  "allow",
 		Mode:      "enforce",
-		LatencyMs: 10,
+		LatencyUs: 10,
 	}
 }
 

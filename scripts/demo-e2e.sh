@@ -1,8 +1,8 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 echo "Building Aegis..."
-make build 2>&1 | tail -1
+make build
 
 # Kill any stale daemon
 pkill -f "aegis-daemon" 2>/dev/null || true

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS traces (
     policy_id       TEXT,
     policy_version  TEXT,
     mode            TEXT NOT NULL DEFAULT 'enforce',
-    latency_ms      INTEGER,
+    latency_us      INTEGER,
     error_code      INTEGER,
     error           TEXT,
     metadata        JSONB

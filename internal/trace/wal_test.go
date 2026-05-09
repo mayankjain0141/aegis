@@ -76,7 +76,7 @@ func TestWAL_RotatesAt100MB(t *testing.T) {
 		RiskScore: 0.9,
 		Decision:  "allow",
 		Mode:      "enforce",
-		LatencyMs: 42,
+		LatencyUs: 42,
 		ArgsHash:  strings.Repeat("x", 200),
 	}
 

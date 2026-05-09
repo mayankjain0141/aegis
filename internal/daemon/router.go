@@ -127,6 +127,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 
 	toolName, args := extractToolCall(env.MCPMessage)
 	argsJSON, _ := json.Marshal(args)
+	argsSummary := truncateStr(string(argsJSON), 200)
 
 	sessCtx := sess.GetContext()
 
@@ -149,7 +150,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 	if err != nil {
 		r.logger.Error("policy evaluation error", "error", err, "tool", toolName)
 		latency := time.Since(start)
-		r.emitTrace(env, toolName, riskScore, "error", nil, latency, err)
+		r.emitTrace(env, toolName, riskScore, "error", nil, latency, err, argsSummary)
 		errResp := buildErrorResponse(env.MCPMessage, "internal policy error")
 		return &ipc.AegisEnvelope{
 			Type:       "mcp_response",
@@ -174,7 +175,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 	switch decision.Action {
 	case policy.ActionDeny:
 		r.metrics.DeniedTotal.Add(1)
-		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil, argsSummary)
 		reason := fmt.Sprintf("Blocked by Aegis: %s", decision.Reason)
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
 		return &ipc.AegisEnvelope{
@@ -187,7 +188,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 
 	case policy.ActionThrottle:
 		r.metrics.DeniedTotal.Add(1)
-		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil, argsSummary)
 		reason := fmt.Sprintf("Blocked by Aegis: rate limited (%s)", decision.Reason)
 		denyResp := buildDenyResponse(env.MCPMessage, reason)
 		return &ipc.AegisEnvelope{
@@ -200,7 +201,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 
 	case policy.ActionEscalateHuman:
 		if r.approvalGate == nil {
-			r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil)
+			r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, nil, argsSummary)
 			reason := "Blocked by Aegis: human approval not configured"
 			denyResp := buildDenyResponse(env.MCPMessage, reason)
 			return &ipc.AegisEnvelope{
@@ -224,7 +225,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		latency = time.Since(start)
 
 		if escalateErr != nil {
-			r.emitTrace(env, toolName, riskScore, "error", decision, latency, escalateErr)
+			r.emitTrace(env, toolName, riskScore, "error", decision, latency, escalateErr, argsSummary)
 			errResp := buildErrorResponse(env.MCPMessage, "approval error: "+escalateErr.Error())
 			return &ipc.AegisEnvelope{
 				Type:       "mcp_response",
@@ -236,7 +237,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 		}
 
 		if approvalResp.Action != "approve" {
-			r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil)
+			r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil, argsSummary)
 			reason := fmt.Sprintf("Blocked by Aegis: human denied (%s)", approvalResp.Reason)
 			denyResp := buildDenyResponse(env.MCPMessage, reason)
 			return &ipc.AegisEnvelope{
@@ -248,7 +249,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 			}, nil
 		}
 
-		r.emitTrace(env, toolName, riskScore, "approve", decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, "approve", decision, latency, nil, argsSummary)
 
 	default:
 		// ActionAllow — proceed to executor
@@ -256,7 +257,7 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 
 	result, execErr := r.executor.Execute(context.Background(), env.ToolName, env.MCPMessage)
 	latency = time.Since(start)
-	r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, execErr)
+	r.emitTrace(env, toolName, riskScore, string(decision.Action), decision, latency, execErr, argsSummary)
 
 	if execErr != nil {
 		r.logger.Error("executor error", "error", execErr, "tool", env.ToolName)
@@ -279,24 +280,27 @@ func (r *Router) handleMCPRequest(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, e
 	}, nil
 }
 
-func (r *Router) emitTrace(env *ipc.AegisEnvelope, toolName string, riskScore float64, decision string, pd *policy.PolicyDecision, latency time.Duration, err error) {
+func (r *Router) emitTrace(env *ipc.AegisEnvelope, toolName string, riskScore float64, decision string, pd *policy.PolicyDecision, latency time.Duration, err error, argsSummary string) {
 	if r.collector == nil {
 		return
 	}
 	ev := &trace.TraceEvent{
-		SessionID: env.SessionID,
-		RequestID: env.RequestID,
-		AgentID:   env.AgentID,
-		Timestamp: time.Now(),
-		Tool:      toolName,
-		RiskScore: riskScore,
-		Decision:  decision,
-		Mode:      "enforce",
-		LatencyMs: int(latency.Milliseconds()),
+		SessionID:   env.SessionID,
+		RequestID:   env.RequestID,
+		AgentID:     env.AgentID,
+		Timestamp:   time.Now(),
+		Tool:        toolName,
+		RiskScore:   riskScore,
+		Decision:    decision,
+		Mode:        "enforce",
+		LatencyUs:   int(latency.Microseconds()),
+		ArgsSummary: argsSummary,
 	}
 	if pd != nil {
 		ev.PolicyID = pd.PolicyName
 		ev.PolicyVersion = pd.PolicyVersion
+		ev.Severity = pd.Severity
+		ev.Reason = pd.Reason
 	}
 	if err != nil {
 		ev.Error = err.Error()
@@ -330,6 +334,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 		json.Unmarshal(env.MCPMessage, &args)
 	}
 	argsJSON, _ := json.Marshal(args)
+	argsSummary := truncateStr(string(argsJSON), 200)
 
 	sessCtx := sess.GetContext()
 	riskScore := r.riskScorer.Score(context.Background(), toolName, string(argsJSON), sessCtx.CallsLastMinute)
@@ -352,7 +357,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 
 	if err != nil {
 		r.logger.Error("policy evaluation error", "error", err, "tool", toolName)
-		r.emitTrace(env, toolName, riskScore, "error", nil, latency, err)
+		r.emitTrace(env, toolName, riskScore, "error", nil, latency, err, argsSummary)
 		return &ipc.AegisEnvelope{
 			Type:      "evaluation",
 			ShimID:    env.ShimID,
@@ -379,7 +384,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 	switch decision.Action {
 	case policy.ActionDeny:
 		r.metrics.DeniedTotal.Add(1)
-		r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil, argsSummary)
 		return &ipc.AegisEnvelope{
 			Type:      "evaluation",
 			ShimID:    env.ShimID,
@@ -395,7 +400,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 
 	case policy.ActionThrottle:
 		r.metrics.DeniedTotal.Add(1)
-		r.emitTrace(env, toolName, riskScore, "throttle", decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, "throttle", decision, latency, nil, argsSummary)
 		return &ipc.AegisEnvelope{
 			Type:      "evaluation",
 			ShimID:    env.ShimID,
@@ -411,7 +416,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 
 	case policy.ActionEscalateHuman:
 		if r.approvalGate == nil {
-			r.emitTrace(env, toolName, riskScore, "escalate", decision, latency, nil)
+			r.emitTrace(env, toolName, riskScore, "escalate", decision, latency, nil, argsSummary)
 			return &ipc.AegisEnvelope{
 				Type:      "evaluation",
 				ShimID:    env.ShimID,
@@ -444,7 +449,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 			} else if approvalResp.Reason != "" {
 				reason = approvalResp.Reason
 			}
-			r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil)
+			r.emitTrace(env, toolName, riskScore, "deny", decision, latency, nil, argsSummary)
 			return &ipc.AegisEnvelope{
 				Type:      "evaluation",
 				ShimID:    env.ShimID,
@@ -459,7 +464,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 			}, nil
 		}
 
-		r.emitTrace(env, toolName, riskScore, "approve", decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, "approve", decision, latency, nil, argsSummary)
 		return &ipc.AegisEnvelope{
 			Type:      "evaluation",
 			ShimID:    env.ShimID,
@@ -474,7 +479,7 @@ func (r *Router) handleEvaluate(env *ipc.AegisEnvelope) (*ipc.AegisEnvelope, err
 
 	default:
 		// ActionAllow
-		r.emitTrace(env, toolName, riskScore, "allow", decision, latency, nil)
+		r.emitTrace(env, toolName, riskScore, "allow", decision, latency, nil, argsSummary)
 		return &ipc.AegisEnvelope{
 			Type:      "evaluation",
 			ShimID:    env.ShimID,
@@ -560,4 +565,11 @@ func buildErrorResponse(mcpMessage json.RawMessage, errMsg string) json.RawMessa
 	}
 	data, _ := json.Marshal(resp)
 	return data
+}
+
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

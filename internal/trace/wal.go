@@ -95,7 +95,7 @@ func (w *WALWriter) Replay(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	const insertSQL = `INSERT INTO traces (
 		session_id, request_id, agent_id, timestamp, tool,
 		args_hash, args_summary, risk_score, decision,
-		policy_id, policy_version, mode, latency_ms,
+		policy_id, policy_version, mode, latency_us,
 		error_code, error, metadata
 	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
 
@@ -120,7 +120,7 @@ func (w *WALWriter) Replay(ctx context.Context, db *pgxpool.Pool) (int, error) {
 		_, err := db.Exec(ctx, insertSQL,
 			ev.SessionID, ev.RequestID, ev.AgentID, ev.Timestamp, ev.Tool,
 			ev.ArgsHash, ev.ArgsSummary, ev.RiskScore, ev.Decision,
-			ev.PolicyID, ev.PolicyVersion, ev.Mode, ev.LatencyMs,
+			ev.PolicyID, ev.PolicyVersion, ev.Mode, ev.LatencyUs,
 			ev.ErrorCode, nilIfEmpty(ev.Error), nil,
 		)
 		if err != nil {

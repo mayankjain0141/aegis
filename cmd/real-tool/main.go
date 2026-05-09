@@ -19,6 +19,10 @@ type FileReadInput struct {
 	Path string `json:"path"`
 }
 
+type FileDeleteInput struct {
+	Path string `json:"path"`
+}
+
 func main() {
 	server := mcp.NewServer(&mcp.Implementation{Name: "aegis-real-tool", Version: "0.1.0"}, nil)
 
@@ -60,6 +64,25 @@ func main() {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{Text: string(data)},
+			},
+		}, nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "file_delete",
+		Description: "Delete a file at the given path",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input FileDeleteInput) (*mcp.CallToolResult, any, error) {
+		if err := os.Remove(input.Path); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: fmt.Sprintf("delete error: %v", err)},
+				},
+			}, nil, nil
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: fmt.Sprintf("deleted: %s", input.Path)},
 			},
 		}, nil, nil
 	})

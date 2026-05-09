@@ -1,4 +1,4 @@
-.PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello
+.PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello integration demo-e2e
 
 build:
 	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
@@ -6,6 +6,7 @@ build:
 	go build -buildvcs=false -o bin/aegis-watch ./cmd/watch
 	go build -buildvcs=false -o bin/mock-tool ./test/mock
 	go build -buildvcs=false -o bin/aegis-real-tool ./cmd/real-tool
+	go build -buildvcs=false -o bin/demo-e2e ./cmd/demo-e2e
 
 install:
 	go install ./cmd/daemon
@@ -54,3 +55,9 @@ fmt:
 	gofmt -w .
 
 ci: lint test build
+
+integration:
+	go test ./test/integration/... -v -count=1 -timeout=30s
+
+demo-e2e: build
+	@bash scripts/demo-e2e.sh

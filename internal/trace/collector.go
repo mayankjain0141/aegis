@@ -188,7 +188,7 @@ func (bc *BatchCollector) writeToPG(batch []*TraceEvent) error {
 	const insertSQL = `INSERT INTO traces (
 		session_id, request_id, agent_id, timestamp, tool,
 		args_hash, args_summary, risk_score, decision,
-		policy_id, policy_version, mode, latency_ms,
+		policy_id, policy_version, mode, latency_us,
 		error_code, error, metadata
 	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
 
@@ -201,7 +201,7 @@ func (bc *BatchCollector) writeToPG(batch []*TraceEvent) error {
 		_, err := tx.Exec(ctx, insertSQL,
 			sessionID, ev.RequestID, ev.AgentID, ev.Timestamp, ev.Tool,
 			ev.ArgsHash, ev.ArgsSummary, ev.RiskScore, ev.Decision,
-			ev.PolicyID, ev.PolicyVersion, ev.Mode, ev.LatencyMs,
+			ev.PolicyID, ev.PolicyVersion, ev.Mode, ev.LatencyUs,
 			errCode, nilIfEmpty(ev.Error), nil,
 		)
 		if err != nil {
@@ -226,7 +226,7 @@ func (bc *BatchCollector) writeToLog(batch []*TraceEvent) {
 			"tool", ev.Tool,
 			"risk_score", fmt.Sprintf("%.2f", ev.RiskScore),
 			"decision", ev.Decision,
-			"latency_ms", ev.LatencyMs,
+			"latency_us", ev.LatencyUs,
 		)
 	}
 }

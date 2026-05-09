@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -64,6 +65,58 @@ func main() {
 			daemonDone = done
 			defer conn.Close()
 		}
+	}
+
+	// Reconnection goroutine — recovers from daemon restarts
+	if *socketPath != "" {
+		go func() {
+			delays := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+			for {
+				// Wait for disconnect (or context cancellation)
+				select {
+				case <-ctx.Done():
+					return
+			case <-daemonDone:
+				// Daemon disconnected — attempt reconnect
+			}
+
+			logger.Info("daemon disconnected, attempting reconnect")
+				reconnected := false
+				for _, delay := range delays {
+					time.Sleep(delay)
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					conn, done, err := connectAndRegister(*socketPath, shimID, *agentID, &pending, logger)
+					if err != nil {
+						logger.Debug("reconnect attempt failed", "error", err, "delay", delay)
+						continue
+					}
+
+					// Swap connection atomically
+					daemonMu.Lock()
+					daemonConn = conn
+					daemonDone = done
+					daemonMu.Unlock()
+
+					logger.Info("reconnected to daemon")
+					reconnected = true
+					break
+				}
+
+				if !reconnected {
+					logger.Warn("all reconnect attempts failed, continuing in standalone mode")
+					// Create a new channel that will never close (don't retry again until explicit signal)
+					standbyDone := make(chan struct{})
+					daemonMu.Lock()
+					daemonDone = standbyDone
+					daemonMu.Unlock()
+				}
+			}
+		}()
 	}
 
 	cmd := exec.Command(toolCmd[0], toolCmd[1:]...)
@@ -223,12 +276,20 @@ func loadLocalPolicy(path string, logger *slog.Logger) policy.PolicyEvaluator {
 	if path == "" {
 		return policy.NewStaticEvaluator(nil, "default", policy.ActionDeny)
 	}
+
+	// Build full pipeline (OPA + extraction + DLP) for standalone mode
+	cmdDBPath := filepath.Join(filepath.Dir(path), "data", "commands.yaml")
+	pipeline := policy.BuildDefaultPipeline(cmdDBPath, logger)
+
+	// Also load YAML rules as fallback
 	eval, err := policy.LoadFromFile(path)
 	if err != nil {
-		logger.Error("failed to load policy, using default-deny", "path", path, "error", err)
-		return policy.NewStaticEvaluator(nil, "default", policy.ActionDeny)
+		logger.Warn("policy YAML load failed, using pipeline only", "path", path, "error", err)
+		return pipeline
 	}
-	return eval
+
+	// Chain: Pipeline first (OPA-based), StaticEvaluator as fallback
+	return policy.EvaluatorChain{pipeline, eval}
 }
 
 func createLocalScorer() *risk.CompositeScorer {

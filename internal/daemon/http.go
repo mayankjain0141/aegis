@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,9 @@ import (
 	"github.com/mayjain/aegis/internal/ws"
 )
 
+//go:embed dashboard.html
+var dashboardHTML []byte
+
 // Metrics holds simple counters for the HTTP /metrics endpoint.
 type Metrics struct {
 	TracesWritten atomic.Int64
@@ -24,6 +28,10 @@ type Metrics struct {
 
 func (d *Daemon) startHTTP(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(dashboardHTML)
+	})
 	mux.HandleFunc("GET /health", d.handleHealth)
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
 	mux.HandleFunc("GET /ws", d.handleWS)
