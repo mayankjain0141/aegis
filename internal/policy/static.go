@@ -104,7 +104,7 @@ func isRateLimited(rl *RateLimitConfig, req *ToolCallRequest) bool {
 	if req.SessionCtx == nil {
 		return false
 	}
-	return req.SessionCtx.CallsLastMinute > rl.MaxPerMinute
+	return req.SessionCtx.CallsLastMinute >= rl.MaxPerMinute
 }
 
 // CompileGlob converts a simple glob pattern to a regexp.

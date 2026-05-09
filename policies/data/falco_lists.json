@@ -1,0 +1,5 @@
+{
+  "shell_binaries": ["bash", "csh", "ksh", "sh", "tcsh", "zsh", "dash", "fish"],
+  "sensitive_file_names": ["/etc/shadow", "/etc/sudoers", "/etc/pam.conf", "/etc/security/passwd", "/etc/ssh/sshd_config"],
+  "network_tools": ["curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "rsync", "telnet", "ftp"]
+}

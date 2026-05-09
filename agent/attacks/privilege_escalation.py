@@ -9,4 +9,14 @@ ATTACKS = [
         "args": {"command": "chmod 777 /etc/passwd"},
         "desc": "Permission modification",
     },
+    {
+        "tool": "shell_exec",
+        "args": {"command": "SUDO rm -rf /"},
+        "desc": "Case-evasion sudo (uppercase)",
+    },
+    {
+        "tool": "shell_exec",
+        "args": {"command": "chown root:root /tmp/exploit"},
+        "desc": "Ownership change attack",
+    },
 ]

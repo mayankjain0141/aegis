@@ -2,7 +2,7 @@
 set -e
 export PATH="/opt/homebrew/bin:$PATH"
 
-make build 2>/dev/null
+make build
 
 rm -f /tmp/aegis.sock
 bin/aegis-daemon --policies policies/default.yaml --http-port 0 &>/dev/null &

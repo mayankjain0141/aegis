@@ -3,35 +3,49 @@ policies:
   - name: block-destructive-shell
     match:
       tool: shell_exec
-      args_pattern: "(rm -rf|DROP TABLE|shutdown|reboot|mkfs|dd if=|fork bomb|:\\(\\)\\{|:\\(\\)|chmod\\s+[0-7]{3,4}\\s+/)"
+      args_pattern: "(?i)(rm\\s+(-[a-z]*)?r[a-z]*f|DROP\\s+TABLE|shutdown|reboot|mkfs|dd\\s+if=|fork\\s*bomb|:\\(\\)\\{|:\\(\\)|chmod\\s+[0-7]{3,4}\\s+/)"
     action: deny
     severity: critical
 
   - name: block-prompt-injection
     match:
       tool: shell_exec
-      args_pattern: "(ignore previous|disregard prior|reveal system prompt|forget your instructions|override safety)"
+      args_pattern: "(?i)(ignore previous|disregard prior|reveal system prompt|forget your instructions|override safety)"
     action: deny
     severity: critical
 
   - name: block-privilege-escalation
     match:
       tool: shell_exec
-      args_pattern: "(sudo |su\\s+|chmod\\s|chown\\s|setuid|passwd)"
+      args_pattern: "(?i)(sudo\\s|su\\s+|chmod\\s|chown\\s|setuid|passwd)"
     action: deny
     severity: high
 
   - name: block-exfiltration
     match:
       tool: shell_exec
-      args_pattern: "(curl.*(-d|--data)|wget.*\\|sh|nc\\s|ncat\\s|/dev/tcp/|exfil)"
+      args_pattern: "(?i)(curl.*(-d|--data)|wget.*\\|\\s*sh|nc\\s|ncat\\s|/dev/tcp/|exfil)"
     action: deny
     severity: high
 
   - name: block-secret-access
     match:
       tool: file_read
-      args_pattern: "(\\.env|credentials|secrets|private_key|id_rsa|id_ed25519|\\.pem|token)"
+      args_pattern: "(?i)(\\.env|credentials|secrets|private_key|id_rsa|id_ed25519|\\.pem|token)"
+    action: deny
+    severity: high
+
+  - name: block-path-traversal
+    match:
+      tool: file_read
+      args_pattern: "(\\.\\./|/etc/(shadow|passwd|sudoers)|/proc/|/sys/|~/.ssh/)"
+    action: deny
+    severity: critical
+
+  - name: block-command-chaining
+    match:
+      tool: shell_exec
+      args_pattern: "(?i)(&&\\s*(rm|chmod|chown|shutdown|reboot|mkfs|dd)|;\\s*(rm|chmod|chown|shutdown|reboot|mkfs|dd)|\\|\\s*(rm|chmod|chown|shutdown|reboot|mkfs|dd))"
     action: deny
     severity: high
 

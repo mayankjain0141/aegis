@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -73,13 +74,19 @@ func NewWithOptions(socketPath, configPath, policyPath, pgURL string, logger *sl
 			logger.Info("loaded policy", "path", policyPath, "version", eval.Version(), "rules", eval.RuleCount())
 		}
 		reloader := policy.NewHotReloader(eval)
-		policyEval = reloader
 
 		var reloadCtx context.Context
 		reloadCtx, reloadCancel = context.WithCancel(context.Background())
 		go func() {
 			_ = policy.WatchAndReload(reloadCtx, policyPath, reloader, logger)
 		}()
+
+		// Build OPA-based pipeline (runs first; returns nil when it has no opinion)
+		cmdDBPath := filepath.Join(filepath.Dir(policyPath), "data", "commands.yaml")
+		pipeline := policy.BuildDefaultPipeline(cmdDBPath, logger)
+
+		// Chain: Pipeline first (OPA-based), StaticEvaluator as fallback
+		policyEval = policy.EvaluatorChain{pipeline, reloader}
 	} else {
 		policyEval = policy.NewStaticEvaluator(nil, "empty", policy.ActionDeny)
 	}
