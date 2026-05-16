@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "aegis-guard"
+version = "2.0.0"
+description = "AI agent security guardrails for OpenAI Agents SDK, Claude Agent SDK, and LangGraph"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["security", "ai", "agents", "guardrails", "policy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+dependencies = []  # No hard deps — adapters imported on demand
+
+[project.optional-dependencies]
+openai = ["openai-agents>=0.1"]
+anthropic = ["anthropic>=0.40"]
+langgraph = ["langchain-core>=0.2", "langgraph>=0.2"]
+all = ["openai-agents>=0.1", "anthropic>=0.40", "langchain-core>=0.2", "langgraph>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/mayjain/aegis"
+Documentation = "https://github.com/mayjain/aegis#readme"
+Issues = "https://github.com/mayjain/aegis/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aegis_guard*"]
