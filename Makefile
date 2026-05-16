@@ -1,4 +1,4 @@
-.PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello integration demo-e2e
+.PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello integration demo-e2e demo-hitl eval-bench
 
 build:
 	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
@@ -7,6 +7,7 @@ build:
 	go build -buildvcs=false -o bin/mock-tool ./test/mock
 	go build -buildvcs=false -o bin/aegis-real-tool ./cmd/real-tool
 	go build -buildvcs=false -o bin/demo-e2e ./cmd/demo-e2e
+	go build -buildvcs=false -o bin/demo-hitl ./cmd/demo-hitl
 
 install:
 	go install ./cmd/daemon
@@ -61,3 +62,9 @@ integration:
 
 demo-e2e: build
 	@bash scripts/demo-e2e.sh
+
+demo-hitl: build
+	@bash scripts/demo-hitl.sh
+
+eval-bench: build
+	@go run ./cmd/eval-bench --corpus testdata/eval/ --verbose

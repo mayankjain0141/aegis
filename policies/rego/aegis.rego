@@ -164,7 +164,7 @@ sensitive_file(path) if contains(path, ".ssh/")
 safe_read_command(name) if name in {"ls", "cat", "head", "tail", "wc", "file", "stat", "echo", "pwd", "whoami", "find", "grep", "rg", "tree"}
 
 safe_gtfobins_usage(cmd) if {
-	cmd.name in {"bash", "sh", "zsh", "dash"}
+	cmd.name in {"bash", "sh", "zsh", "dash", "git", "make", "npm", "node", "go", "docker", "cargo", "pip", "pip3", "python", "python3", "wget", "curl", "ruby", "gem", "yarn", "gradle", "mvn", "cmake", "gcc", "rustc", "tsc", "find", "tar", "ssh", "scp", "rsync", "perl", "php", "lua"}
 }
 
 any_sensitive_path if {
