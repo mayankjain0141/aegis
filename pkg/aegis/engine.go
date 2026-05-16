@@ -11,10 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/mayjain/aegis/internal/extract"
 	"github.com/mayjain/aegis/pkg/aegis/bloom"
 	"github.com/mayjain/aegis/pkg/aegis/rules"
+	"github.com/mayjain/aegis/pkg/aegis/session"
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
 
@@ -33,6 +36,7 @@ type Request struct {
 	Tool      string         `json:"tool"`
 	Arguments map[string]any `json:"arguments"`
 	CWD       string         `json:"cwd"`
+	AgentID   string         `json:"agent_id,omitempty"` // for session tracking; optional
 }
 
 // Decision is the evaluation result.
@@ -43,7 +47,7 @@ type Decision struct {
 	Confidence     float64  `json:"confidence"`
 	Evidence       []string `json:"evidence,omitempty"`
 	CompositeScore float64  `json:"composite_score"`
-	Phase          int      `json:"phase"` // 0=fast_path, 1=static
+	Phase          int      `json:"phase"` // 0=fast_path, 1=static, 2=behavioral
 }
 
 // Engine is the V2 risk evaluation engine.
@@ -51,6 +55,8 @@ type Engine struct {
 	rules     []rules.Rule
 	bloom     *bloom.Filter
 	extractor *extract.Extractor
+	sessions  map[string]*session.State
+	sessionMu sync.Mutex
 }
 
 // Option configures the Engine.
@@ -86,6 +92,7 @@ func NewEngine(opts ...Option) (*Engine, error) {
 		rules:     rules.Phase1Rules(),
 		bloom:     bloom.New(1000, 0.01),
 		extractor: extract.NewExtractor(db),
+		sessions:  make(map[string]*session.State),
 	}
 
 	for _, opt := range opts {
@@ -112,42 +119,116 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	// Fast path: bloom filter exact match
 	key := bloom.CanonicalKey(req.Tool, req.Arguments)
 	if e.bloom.Contains(key) {
-		return &Decision{
-			Action:     ActionAllow,
-			Rule:       "fast_path_allow",
-			Confidence: 1.00,
-			Phase:      0,
-		}
+		d := &Decision{Action: ActionAllow, Rule: "fast_path_allow", Confidence: 1.00, Phase: 0}
+		e.recordCall(req, d, 0.0)
+		return d
 	}
 
-	// Compute all 6 signals
+	// Phase 1: static rule engine
 	bundle := e.computeSignals(req.Tool, argsJSON, req.CWD)
-
-	// Evaluate rules in priority order
-	rule, matched := rules.Evaluate(e.rules, bundle)
-
 	composite := signals.CompositeScore(bundle)
 
+	rule, matched := rules.Evaluate(e.rules, bundle)
+	var d1 *Decision
 	if !matched {
-		return &Decision{
-			Action:         ActionDeny,
-			Rule:           "no_rule_matched",
-			Severity:       "medium",
-			Confidence:     0.50,
-			CompositeScore: composite,
-			Phase:          1,
+		d1 = &Decision{Action: ActionDeny, Rule: "no_rule_matched", Severity: "medium", Confidence: 0.50, CompositeScore: composite, Phase: 1}
+	} else {
+		d1 = &Decision{Action: rule.Action, Rule: rule.Name, Severity: rule.Severity, Confidence: rule.Confidence, Evidence: buildEvidence(bundle), CompositeScore: composite, Phase: 1}
+	}
+
+	// High-confidence Phase 1 decisions are final
+	if d1.Confidence >= 0.85 {
+		e.recordCall(req, d1, composite)
+		return d1
+	}
+
+	// Phase 2: behavioral analysis for low-confidence decisions
+	sess := e.getOrCreateSession(req.AgentID)
+	if sess != nil {
+		sig := sess.Signal(session.ToolCall{Time: time.Now(), Tool: req.Tool})
+		history := toHistoryEntries(sess.RecentCalls(20), bundle)
+		primaryVerb := ""
+		if len(bundle.Command.Verbs) > 0 {
+			primaryVerb = bundle.Command.Verbs[0]
+		}
+		b2 := signals.ComputeBehavioral(
+			bundle, primaryVerb, history,
+			sig.CallsLastMinute,
+			sig.LastDenyTimeAgo, "",
+			sig.BaselineDeviation,
+			sig.RiskTrend,
+		)
+		bBundle := rules.BehavioralBundle{Phase1: bundle, Phase2: b2}
+		if p2rule, p2matched := rules.BehavioralEvaluate(bBundle); p2matched {
+			d2 := &Decision{
+				Action:         p2rule.Action,
+				Rule:           p2rule.Name,
+				Severity:       p2rule.Severity,
+				Confidence:     p2rule.Confidence,
+				CompositeScore: composite,
+				Phase:          2,
+			}
+			e.recordCall(req, d2, composite)
+			return d2
 		}
 	}
 
-	return &Decision{
-		Action:         rule.Action,
-		Rule:           rule.Name,
-		Severity:       rule.Severity,
-		Confidence:     rule.Confidence,
-		Evidence:       buildEvidence(bundle),
-		CompositeScore: composite,
-		Phase:          1,
+	e.recordCall(req, d1, composite)
+	return d1
+}
+
+func (e *Engine) getOrCreateSession(agentID string) *session.State {
+	if agentID == "" {
+		return nil
 	}
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	s, ok := e.sessions[agentID]
+	if !ok {
+		s = session.New(agentID)
+		e.sessions[agentID] = s
+	}
+	return s
+}
+
+func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
+	if req.AgentID == "" {
+		return
+	}
+	s := e.getOrCreateSession(req.AgentID)
+	if s == nil {
+		return
+	}
+	argSummary := req.Tool
+	if cmd, ok := req.Arguments["command"]; ok {
+		if cs, ok := cmd.(string); ok {
+			if len(cs) > 80 {
+				cs = cs[:80]
+			}
+			argSummary = cs
+		}
+	}
+	s.Record(session.ToolCall{
+		Tool:           req.Tool,
+		ArgSummary:     argSummary,
+		Decision:       string(d.Action),
+		Rule:           d.Rule,
+		CompositeScore: composite,
+	})
+}
+
+func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signals.SessionHistoryEntry {
+	entries := make([]signals.SessionHistoryEntry, len(calls))
+	for i, c := range calls {
+		entries[i] = signals.SessionHistoryEntry{
+			Tool:           c.Tool,
+			ArgSummary:     c.ArgSummary,
+			Decision:       c.Decision,
+			Rule:           c.Rule,
+			CompositeScore: c.CompositeScore,
+		}
+	}
+	return entries
 }
 
 // EvaluateJSON is a convenience wrapper that accepts raw JSON arguments string.
