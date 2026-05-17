@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/mayjain/aegis/pkg/aegis"
+	"github.com/mayjain/aegis/pkg/aegis/intent"
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
 
@@ -92,13 +93,14 @@ type PolicyRef struct {
 // ── Server ────────────────────────────────────────────────────────────────
 
 type Server struct {
-	engine    *aegis.Engine
-	ring      *RingBuffer
-	clients   map[chan []byte]struct{}
-	clientsMu sync.Mutex
-	log       *slog.Logger
-	paused    bool
-	pauseMu   sync.Mutex
+	engine     *aegis.Engine
+	ring       *RingBuffer
+	clients    map[chan []byte]struct{}
+	clientsMu  sync.Mutex
+	log        *slog.Logger
+	paused     bool
+	pauseMu    sync.Mutex
+	llmEnabled bool
 }
 
 type RingBuffer struct {
@@ -671,12 +673,39 @@ var scenarios = map[string][]demoStep{
 	"full_demo": {}, // populated below
 }
 
+// phase2_cascade demonstrates Phase 2 behavioral analysis (retry_after_deny):
+//   Step 1: rm -rf /etc → Phase 1 DENY (records verb "rm" in session)
+//   Step 2: rm /tmp/build → Phase 1 ESCALATE (0.60) → Phase 2 retry_after_deny → DENY
+//
+// phase3_cascade demonstrates Phase 3 LLM intent (requires API key):
+//   Commands that Phase 1 ESCALATEs and Phase 2 has no context for.
+//   LLM makes the final call (malicious→DENY, legitimate→ALLOW, suspicious→ESCALATE).
+var phase2Steps = []demoStep{
+	{"git status (baseline)", "Shell", map[string]any{"command": "git status"}, 800},
+	{"npm install (baseline)", "Shell", map[string]any{"command": "npm install"}, 700},
+	{"rm -rf /etc ⚠ [Phase 1 → DENY, verb recorded]", "Shell", map[string]any{"command": "rm -rf /etc"}, 1200},
+	{"rm /tmp/build_cache ⚠ [Phase 1→ESCALATE, Phase 2→retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm /tmp/build_cache"}, 1000},
+	{"rm ./old_logs/*.log ⚠ [Phase 1→ESCALATE, Phase 2→retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm ./old_logs/*.log"}, 900},
+}
+
+// Commands that Phase 1 ESCALATEs (confidence < 0.85) — genuinely ambiguous for LLM
+var phase3Steps = []demoStep{
+	// These are legitimately ambiguous: Phase 1 can't be confident, Phase 2 has no history → Phase 3 needed
+	{"python3 fetch_metrics.py [Phase 1→ESCALATE → Phase 3→LLM]", "Shell", map[string]any{"command": "python3 -c \"import requests; data=requests.get('https://internal-api.company.com/metrics').json(); print(data)\""}, 1500},
+	{"node deploy check [Phase 1→ESCALATE → Phase 3→LLM]", "Shell", map[string]any{"command": "node -e \"const r=require('child_process'); r.execSync('ls ./dist && echo ready')\""}, 1400},
+	{"ssh port forward [Phase 1→ESCALATE → Phase 3→LLM]", "Shell", map[string]any{"command": "ssh -L 5432:db.internal.company.com:5432 bastion.company.com -N"}, 1300},
+	{"python socket check [Phase 1→ESCALATE → Phase 3→LLM]", "Shell", map[string]any{"command": "python3 -c \"import socket; s=socket.socket(); s.connect(('monitoring.company.com',9090)); print(s.recv(100))\""}, 1600},
+}
+
 func init() {
-	// full_demo = dev_workflow + attack_sequence interleaved
+	scenarios["phase2_cascade"] = phase2Steps
+	scenarios["phase3_cascade"] = phase3Steps
+
+	// full_demo covers all phases
 	full := []demoStep{}
 	full = append(full, scenarios["dev_workflow"][:2]...)
-	full = append(full, scenarios["attack_sequence"][3:]...)
-	full = append(full, scenarios["evasion_chain"][1:3]...)
+	full = append(full, scenarios["attack_sequence"][3:6]...)
+	full = append(full, phase2Steps[2:4]...) // retry_after_deny via Phase 2
 	scenarios["full_demo"] = full
 }
 
@@ -686,7 +715,12 @@ func (s *Server) runScenario(name string) {
 		steps = scenarios["attack_sequence"]
 	}
 	sid := sessionID()
-	agentID := "cursor-claude"
+	// Phase 2 cascade needs a stable agentID so session state persists across steps
+	// Phase 3 cascade uses a fresh agentID per run (no prior session = clean Phase 3 trigger)
+	agentID := "cursor-claude-" + sid
+	if name == "phase3_cascade" {
+		agentID = "" // no session → Phase 2 skips → Phase 3 fires on ESCALATE
+	}
 
 	for _, step := range steps {
 		s.pauseMu.Lock()
@@ -715,17 +749,28 @@ func (s *Server) runScenario(name string) {
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	engine, err := aegis.NewEngine()
+	// Build engine — wire real LLM classifier if API key present
+	engineOpts := []aegis.Option{}
+	classifier, classifierErr := tryBuildClassifier(log)
+	if classifierErr == nil && classifier != nil {
+		engineOpts = append(engineOpts, aegis.WithIntentClassifier(classifier))
+		log.Info("Phase 3 LLM classifier active", "model", "gpt-4o-mini")
+	} else {
+		log.Info("Phase 3 LLM disabled (set OPENAI_API_KEY or ANTHROPIC_API_KEY to enable)")
+	}
+
+	engine, err := aegis.NewEngine(engineOpts...)
 	if err != nil {
 		log.Error("engine init failed", "error", err)
 		os.Exit(1)
 	}
 
 	srv := &Server{
-		engine:  engine,
-		ring:    &RingBuffer{},
-		clients: make(map[chan []byte]struct{}),
-		log:     log,
+		engine:        engine,
+		ring:          &RingBuffer{},
+		clients:       make(map[chan []byte]struct{}),
+		log:           log,
+		llmEnabled:    classifier != nil,
 	}
 
 	// Static files
@@ -742,6 +787,10 @@ func main() {
 	mux.HandleFunc("/api/events", srv.handleEvents)
 	mux.HandleFunc("/api/stats", srv.handleStats)
 	mux.HandleFunc("/api/demo", srv.handleDemoControl)
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"llm_enabled": srv.llmEnabled}) //nolint:errcheck
+	})
 
 	// CORS for development
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -787,6 +836,22 @@ func main() {
 	if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Error("server error", "error", err)
 	}
+}
+
+// tryBuildClassifier creates a real LLM classifier from env vars.
+// Checks OPENAI_API_KEY first, then ANTHROPIC_API_KEY.
+func tryBuildClassifier(log *slog.Logger) (*intent.Classifier, error) {
+	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if os.Getenv(env) != "" {
+			c, err := intent.New("gpt-4o-mini", env, 20)
+			if err != nil {
+				log.Warn("classifier init failed", "env", env, "error", err)
+				continue
+			}
+			return c, nil
+		}
+	}
+	return nil, fmt.Errorf("no API key found")
 }
 
 func openBrowser(url string) {

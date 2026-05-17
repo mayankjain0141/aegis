@@ -195,6 +195,9 @@ tailwind.config = {
       <div class="pulse-dot" style="width:7px;height:7px;background:#22c55e;border-radius:50%;"></div>
       <span style="font-size:12px;font-weight:500;color:#71717a;">LIVE</span>
     </div>
+    <div id="llm-status" style="font-size:11px;padding:2px 8px;border-radius:3px;background:#1c1208;color:#52525b;border:1px solid #27272a;display:none;">
+      <span style="color:#f97316;">●</span> P3 LLM active
+    </div>
     <div id="top-rate" style="font-size:11px;color:#52525b;font-family:'JetBrains Mono',monospace;">—</div>
     <div id="top-latency" style="font-size:11px;color:#52525b;font-family:'JetBrains Mono',monospace;">—</div>
 
@@ -210,6 +213,9 @@ tailwind.config = {
       <button class="ghost-btn" onclick="startScenario('attack_sequence')" style="color:#ef4444;">Attack Seq</button>
       <button class="ghost-btn" onclick="startScenario('evasion_chain')" style="color:#f59e0b;">Evasion</button>
       <button class="ghost-btn" onclick="startScenario('exfil_chain')" style="color:#a855f7;">Exfil</button>
+      <div style="width:1px;height:20px;background:#27272a;"></div>
+      <button class="ghost-btn" onclick="startScenario('phase2_cascade')" style="color:#a855f7;" title="Shows Phase 2 behavioral: retry_after_deny">P2 Behavioral ▶</button>
+      <button class="ghost-btn" onclick="startScenario('phase3_cascade')" style="color:#f97316;" title="Shows Phase 3 LLM intent (requires OPENAI_API_KEY)">P3 LLM ▶</button>
     </div>
   </div>
 
@@ -431,6 +437,8 @@ function renderEventList() {
       <div style="text-align:right;white-space:nowrap;">
         <div class="mono" style="font-size:11px;color:${latColor};">${lat}</div>
         <div style="font-size:10px;color:#3f3f46;margin-top:2px;" title="${new Date(ev.time).toISOString()}">${ago}</div>
+        ${ev.phase===2?`<div style="font-size:9px;margin-top:2px;padding:1px 5px;border-radius:2px;background:#1f0a3020;color:#a855f7;border:1px solid #a855f740;">P2 Behavioral</div>`:''}
+        ${ev.phase===3?`<div style="font-size:9px;margin-top:2px;padding:1px 5px;border-radius:2px;background:#1c0f0220;color:#f97316;border:1px solid #f9731640;">P3 LLM</div>`:''}
       </div>
     </div>`;
   }).join('');
@@ -890,6 +898,13 @@ document.addEventListener('keydown', e => {
 // ── Init ─────────────────────────────────────────────────────────────────
 const startTime = Date.now();
 connectSSE();
+// Show LLM status badge if Phase 3 is active
+fetch('/api/info').then(r=>r.json()).then(info=>{
+  if(info.llm_enabled) {
+    const el = document.getElementById('llm-status');
+    if(el) el.style.display='block';
+  }
+}).catch(()=>{});
 setInterval(updateTopBar, 5000);
 
 // Handle deep links
