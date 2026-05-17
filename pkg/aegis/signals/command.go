@@ -22,6 +22,7 @@ type CommandSignal struct {
 // ResolvedCommand is a single binary invocation after unwrapping.
 type ResolvedCommand struct {
 	Binary      string
+	FullPath    string // absolute path if invoked with full path (e.g. /tmp/payload)
 	Args        []string
 	Wrappers    []string
 	VarExpanded bool
@@ -98,15 +99,18 @@ func AnalyzeCommand(tool string, argsJSON string, extractor *extract.Extractor) 
 		}
 	}
 
-	// Carry extracted paths and hosts through for path/network analysis
-	sig.Paths = append(result.Paths, extractRedirectTargets(extractCommandField(argsJSON))...)
+	// Carry extracted paths and hosts through for path/network analysis.
+	// Also extract paths from key=value style args (e.g. dd if=/dev/sda of=/dev/null).
+	kvPaths := extractKeyValuePaths(sig.Commands)
+	sig.Paths = append(append(result.Paths, kvPaths...), extractRedirectTargets(extractCommandField(argsJSON))...)
 	sig.Hosts = result.Hosts
 
 	verbsSeen := make(map[string]bool)
 	for _, cmd := range result.Commands {
 		resolved := ResolvedCommand{
-			Binary: cmd.Name,
-			Args:   cmd.Args,
+			Binary:   cmd.Name,
+			FullPath: cmd.FullPath,
+			Args:     cmd.Args,
 		}
 
 		danger := verbDangerTable[cmd.Name]
@@ -167,6 +171,27 @@ func extractCommandField(argsJSON string) string {
 		}
 	}
 	return ""
+}
+
+// extractKeyValuePaths extracts paths from key=value style arguments (e.g. dd if=/dev/sda).
+func extractKeyValuePaths(cmds []ResolvedCommand) []string {
+	var paths []string
+	for _, cmd := range cmds {
+		for _, arg := range cmd.Args {
+			if idx := strings.Index(arg, "=/"); idx > 0 {
+				path := arg[idx+1:]
+				if strings.HasPrefix(path, "/") {
+					paths = append(paths, path)
+				}
+			}
+			// Also handle home dir: key=~/path
+			if idx := strings.Index(arg, "=~/"); idx > 0 {
+				path := arg[idx+1:]
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
 }
 
 // extractRedirectTargets pulls out shell redirect targets (> /path, >> /path, 2> /path).

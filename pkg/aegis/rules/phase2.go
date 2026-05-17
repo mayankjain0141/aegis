@@ -86,8 +86,9 @@ func BehavioralEvaluate(bundle BehavioralBundle) (Rule, bool) {
 		}, true
 	}
 
-	// Priority 250: session fits baseline — boost confidence for allow
-	if b2.BaselineDeviation < 0.3 && b2.RateBurst == 0 && !b2.RetryAfterDeny {
+	// Priority 250: session fits baseline — only fires after baseline is established (>5 min)
+	// If no baseline yet, don't trust the low deviation score
+	if b2.BaselineEstablished && b2.BaselineDeviation < 0.3 && b2.RateBurst == 0 && !b2.RetryAfterDeny {
 		return Rule{
 			Name:       "session_fits_baseline",
 			Priority:   250,

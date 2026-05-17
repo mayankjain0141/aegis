@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mayjain/aegis/pkg/aegis/telemetry"
 )
 
 func main() {
@@ -26,6 +28,8 @@ func main() {
 		cmdConfig(os.Args[2:])
 	case "audit-report":
 		cmdAuditReport()
+	case "telemetry":
+		cmdTelemetry(os.Args[2:])
 	case "daemon":
 		cmdDaemon(os.Args[2:])
 	case "version":
@@ -48,6 +52,7 @@ Usage:
   aegis config set <key> <value>  Update a config value
   aegis config show       Show full config
   aegis audit-report      Show what would be blocked (audit mode summary)
+  aegis telemetry [show|clear]  Show decision telemetry summary
   aegis daemon start      Start the session state daemon
   aegis daemon stop       Stop the daemon
   aegis daemon status     Show daemon status
@@ -434,6 +439,64 @@ func cmdDaemon(args []string) {
 		}
 	default:
 		fatalf("unknown daemon subcommand: %s", args[0])
+	}
+}
+
+func cmdTelemetry(args []string) {
+	sub := "show"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+
+	cfg, _ := loadConfig()
+	logPath := cfg.Logging.AuditLog
+	if logPath == "" {
+		logPath = "~/.aegis/audit.log"
+	}
+	if strings.HasPrefix(logPath, "~/") {
+		logPath = filepath.Join(os.Getenv("HOME"), logPath[2:])
+	}
+
+	switch sub {
+	case "clear":
+		if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Telemetry cleared.")
+
+	default: // "show"
+		events, err := telemetry.ReadAll(logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "No telemetry data at %s\n  Run with AEGIS_MODE=audit to collect data.\n", logPath)
+			os.Exit(1)
+		}
+		if len(events) == 0 {
+			fmt.Println("No events recorded yet.")
+			return
+		}
+
+		stats := telemetry.Summarize(events)
+		fmt.Printf("Telemetry: %d events", stats.Total)
+		if !stats.FirstTime.IsZero() {
+			fmt.Printf(" (%s → %s)",
+				stats.FirstTime.Format("2006-01-02 15:04"),
+				stats.LastTime.Format("2006-01-02 15:04"))
+		}
+		fmt.Println()
+		fmt.Println()
+
+		fmt.Println("By action:")
+		for _, action := range []string{"allow", "deny", "escalate", "throttle"} {
+			if n := stats.ByAction[action]; n > 0 {
+				fmt.Printf("  %-12s %d\n", action, n)
+			}
+		}
+
+		fmt.Println("\nTop blocked rules:")
+		for _, r := range telemetry.TopRules(stats.ByRule, 10) {
+			fmt.Printf("  %-38s %d\n", r.Rule, r.Count)
+		}
 	}
 }
 

@@ -149,3 +149,24 @@ func popcount(x uint64) int {
 	}
 	return count
 }
+
+// Export returns the internal state for persistence.
+func (f *Filter) Export() (data []uint64, m, k int) {
+	if f == nil {
+		return nil, 0, 0
+	}
+	d := make([]uint64, len(f.data))
+	copy(d, f.data)
+	return d, f.m, f.k
+}
+
+// Import restores bloom filter state from persisted data.
+func Import(data []uint64, m, k int) *Filter {
+	f := &Filter{
+		data: make([]uint64, len(data)),
+		m:    m,
+		k:    k,
+	}
+	copy(f.data, data)
+	return f
+}

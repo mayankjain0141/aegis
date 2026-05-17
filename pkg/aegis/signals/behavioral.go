@@ -7,14 +7,15 @@ import (
 
 // BehavioralSignal is the Phase 2 signal derived from session history.
 type BehavioralSignal struct {
-	RateBurst         float64 // calls/min vs baseline; 0=normal, 0.8=burst
-	SequenceRisk      float64 // 0-1 from known-bad sequence matching
-	EscalationGradient float64 // slope of risk scores; positive = escalating
-	BaselineDeviation float64 // cosine distance from baseline tool distribution
-	RetryAfterDeny    bool    // same or equivalent verb within 60s of deny
-	RetryVerb         string  // the verb being retried
-	SequenceName      string  // which known-bad sequence matched (if any)
-	Score             float64 // composite behavioral score
+	RateBurst           float64 // calls/min vs baseline; 0=normal, 0.8=burst
+	SequenceRisk        float64 // 0-1 from known-bad sequence matching
+	EscalationGradient  float64 // slope of risk scores; positive = escalating
+	BaselineDeviation   float64 // cosine distance from baseline tool distribution
+	BaselineEstablished bool    // whether the baseline has been set (>5 min of traffic)
+	RetryAfterDeny      bool    // same or equivalent verb within 60s of deny
+	RetryVerb           string  // the verb being retried
+	SequenceName        string  // which known-bad sequence matched (if any)
+	Score               float64 // composite behavioral score
 }
 
 // SessionHistoryEntry is what Phase 2 receives from session state (avoids import cycle).

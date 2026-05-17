@@ -307,10 +307,16 @@ func Phase1Rules() []Rule {
 						return true
 					}
 				}
-				// go test, cargo test
+				// go test, cargo test, python3 -m pytest
 				for _, cmd := range b.Command.Commands {
 					if (cmd.Binary == "go" || cmd.Binary == "cargo") &&
 						len(cmd.Args) > 0 && cmd.Args[0] == "test" {
+						return true
+					}
+					// python3 -m pytest / python -m unittest
+					if (cmd.Binary == "python3" || cmd.Binary == "python") &&
+						len(cmd.Args) >= 2 && cmd.Args[0] == "-m" &&
+						(cmd.Args[1] == "pytest" || cmd.Args[1] == "unittest") {
 						return true
 					}
 				}
@@ -361,6 +367,36 @@ func Phase1Rules() []Rule {
 				}
 				// Even empty commands can exfiltrate secrets via env vars in args
 				return !(b.DLP.HasHit && !b.DLP.AllTest)
+			},
+		},
+		{
+			Name:       "execute_from_tmp",
+			Priority:   21,
+			Action:     ActionDeny,
+			Severity:   "high",
+			Confidence: 0.88,
+			Condition: func(b *signals.SignalBundle) bool {
+				// Executing a binary directly from /tmp or /var/tmp is suspicious
+				// (common pattern: download to /tmp + execute)
+				if b.ToolClass.Category != "shell" {
+					return false
+				}
+				for _, cmd := range b.Command.Commands {
+					// Direct execution: the binary itself is in /tmp (via FullPath)
+					if strings.HasPrefix(cmd.FullPath, "/tmp/") ||
+						strings.HasPrefix(cmd.FullPath, "/var/tmp/") {
+						return true
+					}
+					// bash/sh executing a /tmp script: bash /tmp/run.sh
+					if isShellInterpreterVerb(cmd.Binary) && len(cmd.Args) > 0 {
+						firstArg := cmd.Args[0]
+						if firstArg != "-c" && (strings.HasPrefix(firstArg, "/tmp/") ||
+							strings.HasPrefix(firstArg, "/var/tmp/")) {
+							return true
+						}
+					}
+				}
+				return false
 			},
 		},
 		{
@@ -816,16 +852,32 @@ func removesArtifacts(b *signals.SignalBundle) bool {
 
 func privilegedDocker(b *signals.SignalBundle) bool {
 	for _, cmd := range b.Command.Commands {
-		if cmd.Binary != "docker" && cmd.Binary != "docker-compose" {
-			continue
-		}
-		for _, arg := range cmd.Args {
-			if arg == "--privileged" || arg == "--pid=host" || arg == "--network=host" {
-				return true
+		switch cmd.Binary {
+		case "docker", "docker-compose":
+			for _, arg := range cmd.Args {
+				if arg == "--privileged" || arg == "--pid=host" || arg == "--network=host" {
+					return true
+				}
 			}
-			if strings.HasPrefix(arg, "-v") || arg == "-v" {
-				// Could be mounting sensitive paths — check next arg
-				// Simplified: flag for volume mounts of critical paths
+		case "kubectl":
+			// kubectl exec with a shell is privilege escalation
+			isExec := false
+			for i, arg := range cmd.Args {
+				if arg == "exec" {
+					isExec = true
+				}
+				if isExec && i > 0 {
+					if arg == "bash" || arg == "sh" || arg == "zsh" || arg == "/bin/bash" || arg == "/bin/sh" {
+						return true
+					}
+					// kubectl exec pod -- bash (after --)
+					if arg == "--" && i+1 < len(cmd.Args) {
+						next := cmd.Args[i+1]
+						if next == "bash" || next == "sh" || next == "zsh" {
+							return true
+						}
+					}
+				}
 			}
 		}
 	}

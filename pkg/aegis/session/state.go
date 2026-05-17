@@ -120,7 +120,7 @@ func (s *State) Signal(current ToolCall) SessionSignal {
 	// Risk trend (slope over last 20 calls)
 	sig.RiskTrend = s.computeRiskTrend()
 
-	// Baseline deviation
+	sig.BaselineEstablished = s.baselineSet
 	if s.baselineSet {
 		sig.BaselineDeviation = s.computeBaselineDeviation()
 	}
@@ -278,14 +278,15 @@ func (s *State) computeBaselineDeviation() float64 {
 
 // SessionSignal is the output of session state analysis for Phase 2 rules.
 type SessionSignal struct {
-	CallsLastMinute   int
-	CallsLast5Minutes int
-	UniqueToolsUsed   int
-	RecentDenyCount   int
-	LastDenyTool      string
-	LastDenyTimeAgo   time.Duration
-	LastDenyRule      string
-	ToolSequence      []string
-	RiskTrend         float64
-	BaselineDeviation float64
+	CallsLastMinute     int
+	CallsLast5Minutes   int
+	UniqueToolsUsed     int
+	RecentDenyCount     int
+	LastDenyTool        string
+	LastDenyTimeAgo     time.Duration
+	LastDenyRule        string
+	ToolSequence        []string
+	RiskTrend           float64
+	BaselineDeviation   float64
+	BaselineEstablished bool // true only after 5+ minutes of traffic
 }

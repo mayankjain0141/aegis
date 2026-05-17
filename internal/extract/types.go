@@ -16,6 +16,7 @@ type Result struct {
 
 // Command is a single resolved binary invocation.
 type Command struct {
-	Name string   // binary basename (e.g. "rm", "curl")
-	Args []string // expanded arguments (e.g. ["-rf", "/tmp"])
+	Name     string   // binary basename (e.g. "rm", "curl")
+	Args     []string // expanded arguments (e.g. ["-rf", "/tmp"])
+	FullPath string   // original full path if invoked with absolute path (e.g. "/tmp/payload")
 }

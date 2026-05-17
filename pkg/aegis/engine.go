@@ -16,6 +16,7 @@ import (
 
 	"github.com/mayjain/aegis/internal/extract"
 	"github.com/mayjain/aegis/pkg/aegis/bloom"
+	"github.com/mayjain/aegis/pkg/aegis/intent"
 	"github.com/mayjain/aegis/pkg/aegis/rules"
 	"github.com/mayjain/aegis/pkg/aegis/session"
 	"github.com/mayjain/aegis/pkg/aegis/signals"
@@ -52,11 +53,18 @@ type Decision struct {
 
 // Engine is the V2 risk evaluation engine.
 type Engine struct {
-	rules     []rules.Rule
-	bloom     *bloom.Filter
-	extractor *extract.Extractor
-	sessions  map[string]*session.State
-	sessionMu sync.Mutex
+	rules          []rules.Rule
+	bloom          *bloom.Filter
+	extractor      *extract.Extractor // fast (AST-only) for Phase 1
+	fullExtractor  *extract.Extractor // full (with dry-run) for Phase 2
+	sessions       map[string]*session.State
+	sessionMu      sync.Mutex
+	intentClassifier intentClassifier
+}
+
+// intentClassifier is an interface so we can wire in intent.Classifier without a hard dep.
+type intentClassifier interface {
+	Classify(ctx context.Context, req *intent.ClassifyRequest) (*intent.IntentSignal, error)
 }
 
 // Option configures the Engine.
@@ -89,10 +97,11 @@ func NewEngine(opts ...Option) (*Engine, error) {
 	}
 
 	e := &Engine{
-		rules:     rules.Phase1Rules(),
-		bloom:     bloom.New(1000, 0.01),
-		extractor: extract.NewExtractor(db),
-		sessions:  make(map[string]*session.State),
+		rules:         rules.Phase1Rules(),
+		bloom:         bloom.New(1000, 0.01),
+		extractor:     extract.NewFastExtractor(db), // AST-only for Phase 1 speed
+		fullExtractor: extract.NewExtractor(db),     // full dry-run for Phase 2
+		sessions:      make(map[string]*session.State),
 	}
 
 	for _, opt := range opts {
@@ -143,8 +152,14 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	}
 
 	// Phase 2: behavioral analysis for low-confidence decisions
+	var d2 *Decision
+	var d2matched bool
 	sess := e.getOrCreateSession(req.AgentID)
 	if sess != nil {
+		// Recompute with full extractor for better signal quality
+		bundle = e.computeSignalsFull(req.Tool, argsJSON, req.CWD)
+		composite = signals.CompositeScore(bundle)
+
 		sig := sess.Signal(session.ToolCall{Time: time.Now(), Tool: req.Tool})
 		history := toHistoryEntries(sess.RecentCalls(20), bundle)
 		primaryVerb := ""
@@ -158,9 +173,11 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 			sig.BaselineDeviation,
 			sig.RiskTrend,
 		)
+		b2.BaselineEstablished = sig.BaselineEstablished
 		bBundle := rules.BehavioralBundle{Phase1: bundle, Phase2: b2}
-		if p2rule, p2matched := rules.BehavioralEvaluate(bBundle); p2matched {
-			d2 := &Decision{
+		if p2rule, p2matched2 := rules.BehavioralEvaluate(bBundle); p2matched2 {
+			d2matched = true
+			d2 = &Decision{
 				Action:         p2rule.Action,
 				Rule:           p2rule.Name,
 				Severity:       p2rule.Severity,
@@ -168,13 +185,60 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 				CompositeScore: composite,
 				Phase:          2,
 			}
-			e.recordCall(req, d2, composite)
-			return d2
 		}
 	}
 
+	// Phase 3: LLM intent for persistent uncertainty (ESCALATE decisions)
+	if e.intentClassifier != nil {
+		finalAction := d1.Action
+		if d2matched {
+			finalAction = d2.Action
+		}
+		if finalAction == ActionEscalate {
+			creq := &intent.ClassifyRequest{
+				Tool: req.Tool,
+				Args: req.Arguments,
+			}
+			if sess != nil {
+				for _, h := range sess.RecentCalls(5) {
+					creq.SessionLast = append(creq.SessionLast, intent.SessionEntry{
+						Tool:    h.Tool,
+						Summary: h.ArgSummary,
+						AgoS:    int(time.Since(h.Time).Seconds()),
+					})
+				}
+			}
+			sig, err := e.intentClassifier.Classify(ctx, creq)
+			if err != nil {
+				d3 := &Decision{Action: ActionDeny, Rule: "llm_timeout", Confidence: 0.60, CompositeScore: composite, Phase: 3}
+				e.recordCall(req, d3, composite)
+				return d3
+			}
+			d3 := applyPhase3Rules(sig, composite)
+			e.recordCall(req, d3, composite)
+			return d3
+		}
+	}
+
+	if d2matched {
+		e.recordCall(req, d2, composite)
+		return d2
+	}
 	e.recordCall(req, d1, composite)
 	return d1
+}
+
+func applyPhase3Rules(sig *intent.IntentSignal, composite float64) *Decision {
+	switch {
+	case sig.Intent == "malicious" && sig.Confidence > 0.8:
+		return &Decision{Action: ActionDeny, Rule: "llm_malicious", Severity: "high", Confidence: 0.90, CompositeScore: composite, Phase: 3}
+	case sig.Intent == "suspicious" && sig.Confidence > 0.8:
+		return &Decision{Action: ActionEscalate, Rule: "llm_suspicious_high", Severity: "medium", Confidence: 0.75, CompositeScore: composite, Phase: 3}
+	case sig.Intent == "legitimate" && sig.Confidence > 0.8:
+		return &Decision{Action: ActionAllow, Rule: "llm_legitimate", Confidence: 0.85, CompositeScore: composite, Phase: 3}
+	default:
+		return &Decision{Action: ActionDeny, Rule: "llm_uncertain", Confidence: 0.65, CompositeScore: composite, Phase: 3}
+	}
 }
 
 func (e *Engine) getOrCreateSession(agentID string) *session.State {
@@ -238,6 +302,34 @@ func (e *Engine) EvaluateJSON(ctx context.Context, tool, argsJSON, cwd string) *
 		args = map[string]any{}
 	}
 	return e.Evaluate(ctx, &Request{Tool: tool, Arguments: args, CWD: cwd})
+}
+
+// WithIntentClassifier wires a Phase 3 LLM intent classifier into the engine.
+func WithIntentClassifier(c *intent.Classifier) Option {
+	return func(e *Engine) { e.intentClassifier = c }
+}
+
+func (e *Engine) computeSignalsFull(tool, argsJSON, cwd string) *signals.SignalBundle {
+	toolClass := signals.ClassifyTool(tool)
+	cmd := signals.AnalyzeCommand(tool, argsJSON, e.fullExtractor)
+	extraPaths := append([]string(nil), cmd.Paths...)
+	for _, c := range cmd.Commands {
+		if hasDataFile, filePath := signals.HasDataFilePattern(c.Args); hasDataFile && filePath != "" {
+			extraPaths = append(extraPaths, filePath)
+		}
+	}
+	pathSig := signals.AnalyzePathsFromArgs(tool, argsJSON, cwd, extraPaths)
+	netSig := signals.AnalyzeNetworkFromExtracted(cmd)
+	dlpSig := signals.ScanDLP(argsJSON)
+	evasionSig := signals.AnalyzeEvasion(cmd, argsJSON)
+	return &signals.SignalBundle{
+		ToolClass: toolClass,
+		Command:   cmd,
+		Path:      pathSig,
+		Network:   netSig,
+		DLP:       dlpSig,
+		Evasion:   evasionSig,
+	}
 }
 
 func (e *Engine) computeSignals(tool, argsJSON, cwd string) *signals.SignalBundle {

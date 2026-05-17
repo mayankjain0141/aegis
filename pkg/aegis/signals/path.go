@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // PathSignal is Signal 3: file path risk analysis.
@@ -242,12 +243,36 @@ func isInProject(normalized, raw, cwd, projectRoot string) bool {
 	return !strings.HasPrefix(rel, "..")
 }
 
+var (
+	projectRootCache   = make(map[string]string)
+	projectRootCacheMu sync.RWMutex
+)
+
 // findProjectRoot walks up from cwd looking for .git directory.
+// Results are cached to avoid repeated filesystem traversals.
 func findProjectRoot(cwd string) string {
 	if cwd == "" {
 		return ""
 	}
-	dir := filepath.Clean(cwd)
+	clean := filepath.Clean(cwd)
+
+	projectRootCacheMu.RLock()
+	if cached, ok := projectRootCache[clean]; ok {
+		projectRootCacheMu.RUnlock()
+		return cached
+	}
+	projectRootCacheMu.RUnlock()
+
+	root := walkToGitRoot(clean)
+
+	projectRootCacheMu.Lock()
+	projectRootCache[clean] = root
+	projectRootCacheMu.Unlock()
+
+	return root
+}
+
+func walkToGitRoot(dir string) string {
 	for {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return dir
@@ -258,5 +283,5 @@ func findProjectRoot(cwd string) string {
 		}
 		dir = parent
 	}
-	return cwd // fall back to cwd if no .git found
+	return dir // return highest reachable dir as fallback
 }
