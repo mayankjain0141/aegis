@@ -307,6 +307,34 @@ func cmdConfig(args []string) {
 		default:
 			fatalf("unknown config key: %s", args[1])
 		}
+	case "set":
+		if len(args) < 3 {
+			fatalf("usage: aegis config set <key> <value>")
+		}
+		key, val := args[1], args[2]
+		if path == "" {
+			path = ".aegis/config.yaml"
+		}
+		data, _ := os.ReadFile(path)
+		content := string(data)
+		switch key {
+		case "mode":
+			if val != "enforce" && val != "audit" && val != "off" {
+				fatalf("mode must be enforce|audit|off, got %q", val)
+			}
+			content = replaceConfigLine(content, "mode:", "mode: "+val)
+		case "sensitivity":
+			if val != "strict" && val != "balanced" && val != "permissive" {
+				fatalf("sensitivity must be strict|balanced|permissive, got %q", val)
+			}
+			content = replaceConfigLine(content, "sensitivity:", "sensitivity: "+val)
+		default:
+			fatalf("unknown config key %q (supported: mode, sensitivity)", key)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			fatalf("write config: %v", err)
+		}
+		fmt.Printf("Set %s = %s in %s\n", key, val, path)
 	case "show":
 		cmdConfigShow(cfg, path)
 	default:
@@ -318,7 +346,7 @@ func cmdConfigShow(cfg *Config, path string) {
 	if path != "" {
 		fmt.Printf("Config file: %s\n\n", path)
 	} else {
-		fmt.Println("Config file: (none found, using defaults)\n")
+		fmt.Println("Config file: (none found, using defaults)")
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "mode\t%s\n", cfg.Mode)
@@ -598,6 +626,18 @@ func cmdTelemetry(args []string) {
 			fmt.Printf("  %-38s %d\n", r.Rule, r.Count)
 		}
 	}
+}
+
+// replaceConfigLine replaces the first line starting with prefix in content.
+func replaceConfigLine(content, prefix, newLine string) string {
+	lines := strings.Split(content, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), strings.TrimSpace(prefix)) {
+			lines[i] = newLine
+			return strings.Join(lines, "\n")
+		}
+	}
+	return content + "\n" + newLine
 }
 
 func fatalf(format string, args ...any) {

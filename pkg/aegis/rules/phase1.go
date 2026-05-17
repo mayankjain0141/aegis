@@ -91,7 +91,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "critical_path_write",
-			Priority:   13,
+			Priority:   14,
 			Action:     ActionDeny,
 			Severity:   "critical",
 			Confidence: 0.95,
@@ -106,7 +106,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "secret_leakage",
-			Priority:   14,
+			Priority:   15,
 			Action:     ActionDeny,
 			Severity:   "high",
 			Confidence: 0.95,
@@ -116,7 +116,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "sensitive_file_access",
-			Priority:   15,
+			Priority:   16,
 			Action:     ActionDeny,
 			Severity:   "critical",
 			Confidence: 0.90,
@@ -135,7 +135,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "data_exfiltration",
-			Priority:   16,
+			Priority:   17,
 			Action:     ActionDeny,
 			Severity:   "critical",
 			Confidence: 0.92,
@@ -148,7 +148,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "remote_code_execution",
-			Priority:   17,
+			Priority:   18,
 			Action:     ActionDeny,
 			Severity:   "critical",
 			Confidence: 0.95,
@@ -158,7 +158,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "suid_manipulation",
-			Priority:   18,
+			Priority:   19,
 			Action:     ActionDeny,
 			Severity:   "high",
 			Confidence: 0.90,
@@ -166,7 +166,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "cron_persistence",
-			Priority:   19,
+			Priority:   20,
 			Action:     ActionDeny,
 			Severity:   "high",
 			Confidence: 0.88,
@@ -192,7 +192,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "bashrc_persistence",
-			Priority:   20,
+			Priority:   21,
 			Action:     ActionDeny,
 			Severity:   "high",
 			Confidence: 0.88,
@@ -250,11 +250,14 @@ func Phase1Rules() []Rule {
 			Severity:   "",
 			Confidence: 0.90,
 			Condition: func(b *signals.SignalBundle) bool {
+				// git is handled by benign_git_ops (priority 57) with subcommand safelist.
+				// go is handled by benign_go_ops (priority 52b) with subcommand safelist.
 				pkgVerbs := map[string]bool{
-					"git": true, "npm": true, "pip": true, "pip3": true, "cargo": true,
+					"npm": true, "pip": true, "pip3": true, "cargo": true,
 					"yarn": true, "brew": true, "apt": true, "apt-get": true,
 					"yum": true, "dnf": true, "pacman": true, "gem": true,
-					"composer": true, "go": true, "pnpm": true, "bun": true,
+					"composer": true, "pnpm": true, "bun": true,
+					"poetry": true, "uv": true, "pipenv": true,
 				}
 				for _, v := range b.Command.Verbs {
 					if pkgVerbs[v] {
@@ -265,8 +268,30 @@ func Phase1Rules() []Rule {
 			},
 		},
 		{
-			Name:       "benign_build_tools",
+			Name:       "benign_go_ops",
 			Priority:   53,
+			Action:     ActionAllow,
+			Severity:   "",
+			Confidence: 0.93,
+			Condition: func(b *signals.SignalBundle) bool {
+				// Safe go subcommands — run/generate are excluded (arbitrary code)
+				safeGoSubs := map[string]bool{
+					"build": true, "test": true, "mod": true, "get": true,
+					"fmt": true, "vet": true, "clean": true, "env": true,
+					"list": true, "tool": true, "version": true, "doc": true,
+					"install": true, "work": true, "generate": true,
+				}
+				for _, cmd := range b.Command.Commands {
+					if cmd.Binary == "go" && len(cmd.Args) > 0 && safeGoSubs[cmd.Args[0]] {
+						return true
+					}
+				}
+				return false
+			},
+		},
+		{
+			Name:       "benign_build_tools",
+			Priority:   54,
 			Action:     ActionAllow,
 			Severity:   "",
 			Confidence: 0.95,
@@ -391,7 +416,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "execute_from_tmp",
-			Priority:   21,
+			Priority:   22,
 			Action:     ActionDeny,
 			Severity:   "high",
 			Confidence: 0.88,
@@ -573,7 +598,7 @@ func Phase1Rules() []Rule {
 		},
 		{
 			Name:       "benign_safe_read_system",
-			Priority:   64,
+			Priority:   63,
 			Action:     ActionAllow,
 			Severity:   "",
 			Confidence: 0.85,

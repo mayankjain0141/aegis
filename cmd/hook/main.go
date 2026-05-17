@@ -100,10 +100,16 @@ func main() {
 		return
 	}
 
-	// Fail-open on engine panics
+	// req is declared before the defer so the panic recovery can log it to the WAL.
+	var req *normalizedRequest
+
+	// Fail-open on engine panics; write a panic event to the WAL before allowing.
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintln(os.Stderr, "aegis: panic recovered:", r)
+			if req != nil {
+				writeWAL(req, &aegis.Decision{Action: aegis.ActionAllow, Rule: "panic_recovered"}, 0)
+			}
 			writeAllow()
 		}
 	}()
@@ -114,7 +120,7 @@ func main() {
 		return
 	}
 
-	req, err := parseHookInput(input)
+	req, err = parseHookInput(input)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "aegis: parse error (fail-open):", err)
 		writeAllow()
@@ -250,7 +256,7 @@ func defaultLogPath() string {
 		return ""
 	}
 	dir := filepath.Join(home, ".aegis")
-	os.MkdirAll(dir, 0o755) //nolint:errcheck
+	os.MkdirAll(dir, 0o700) //nolint:errcheck
 	return filepath.Join(dir, "audit.log")
 }
 

@@ -99,10 +99,6 @@ func AnalyzeCommand(tool string, argsJSON string, extractor *extract.Extractor) 
 		}
 	}
 
-	// Carry extracted paths and hosts through for path/network analysis.
-	// Also extract paths from key=value style args (e.g. dd if=/dev/sda of=/dev/null).
-	kvPaths := extractKeyValuePaths(sig.Commands)
-	sig.Paths = append(append(result.Paths, kvPaths...), extractRedirectTargets(extractCommandField(argsJSON))...)
 	sig.Hosts = result.Hosts
 
 	verbsSeen := make(map[string]bool)
@@ -131,6 +127,10 @@ func AnalyzeCommand(tool string, argsJSON string, extractor *extract.Extractor) 
 			}
 		}
 	}
+
+	// extractKeyValuePaths must run AFTER sig.Commands is populated (e.g. dd if=/dev/sda).
+	kvPaths := extractKeyValuePaths(sig.Commands)
+	sig.Paths = append(append(result.Paths, kvPaths...), extractRedirectTargets(extractCommandField(argsJSON))...)
 
 	return sig
 }

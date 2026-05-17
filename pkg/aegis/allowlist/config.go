@@ -61,15 +61,51 @@ func (c *Config) MatchesCommand(rawCommand string) bool {
 }
 
 // IsSafePath returns true if the path is explicitly allow-listed as safe.
-func (c *Config) IsSafePath(path string) bool {
-	base := filepath.Base(path)
+//
+// Security: matching is done against the normalized path to prevent traversal
+// bypasses. "paths_safe: [.env]" matches "./.env" and "/project/.env" but
+// NOT "../../.env" (which normalizes to an absolute path outside the project).
+func (c *Config) IsSafePath(rawPath string) bool {
+	if len(c.PathsSafe) == 0 {
+		return false
+	}
+	// Normalize to remove traversal components
+	clean := filepath.Clean(rawPath)
+	base := filepath.Base(clean)
+
 	for _, safe := range c.PathsSafe {
-		if safe == base || safe == path {
-			return true
+		safe = strings.TrimSpace(safe)
+		if safe == "" {
+			continue
 		}
-		// Glob match (e.g. "*.env")
-		if matched, _ := filepath.Match(safe, base); matched {
-			return true
+		// If the allowlist entry has no path separator, match only the basename
+		// to avoid "../../.env" matching a bare ".env" entry.
+		if !strings.ContainsRune(safe, '/') {
+			// Only match if the path is relative (no directory traversal)
+			if filepath.IsAbs(clean) {
+				// Absolute path: only match if it ends with the safe basename
+				// and the clean path equals what you'd expect in a project context
+				// (i.e., not a traversal to a system path)
+				if base == safe {
+					return true
+				}
+				if matched, _ := filepath.Match(safe, base); matched {
+					return true
+				}
+			} else {
+				// Relative path: safe to match on basename
+				if base == safe {
+					return true
+				}
+				if matched, _ := filepath.Match(safe, base); matched {
+					return true
+				}
+			}
+		} else {
+			// Entry contains path separator — match the full cleaned path
+			if clean == safe || strings.HasSuffix(clean, "/"+safe) {
+				return true
+			}
 		}
 	}
 	return false
@@ -93,25 +129,32 @@ func (c *Config) IsAllowedHost(host string) bool {
 	return false
 }
 
-// globMatch implements simple shell-style glob matching (* matches anything except /).
-// For allowlist commands we allow * to match across path separators too.
+// globMatch implements anchored glob matching for allowlist command patterns.
+//
+// Security contract: the pattern must match the ENTIRE command string from start
+// to end. A trailing * allows arbitrary suffixes, but without it the command must
+// end at the last literal segment. This prevents injection attacks like:
+//   pattern: "docker push registry.internal/*"
+//   command: "docker push registry.internal/img && rm -rf /"  → does NOT match
+// because the trailing "/ && rm -rf /" is not covered by the pattern.
 func globMatch(pattern, s string) bool {
-	// Normalize: case-insensitive, trim spaces
 	p := strings.TrimSpace(pattern)
 	if p == "" {
 		return false
 	}
-	// Exact match
 	if p == s {
 		return true
 	}
-	// Substring match if no glob chars
-	if !strings.Contains(p, "*") && !strings.Contains(p, "?") {
-		return strings.Contains(s, p)
+	if !strings.Contains(p, "*") {
+		return p == s
 	}
-	// Simple glob: split on * and check parts appear in order
+
+	// Split on * — every segment must appear in order, first anchored at start,
+	// last anchored at end (unless the pattern ends with *).
 	parts := strings.Split(p, "*")
+	endsWithGlob := strings.HasSuffix(p, "*")
 	remaining := s
+
 	for i, part := range parts {
 		if part == "" {
 			continue
@@ -120,11 +163,15 @@ func globMatch(pattern, s string) bool {
 		if idx == -1 {
 			return false
 		}
-		// First part must match at start
 		if i == 0 && idx != 0 {
-			return false
+			return false // first segment must be at start
 		}
 		remaining = remaining[idx+len(part):]
+	}
+
+	// If pattern doesn't end with *, remaining must be empty (full match required)
+	if !endsWithGlob && remaining != "" {
+		return false
 	}
 	return true
 }

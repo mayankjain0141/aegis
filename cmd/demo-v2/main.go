@@ -5,7 +5,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+
 	"fmt"
 	"os"
 	"strings"
@@ -221,14 +221,3 @@ func m(k, v string) map[string]any {
 	return map[string]any{k: v}
 }
 
-// argsString returns a readable one-liner for args.
-func argsString(args map[string]any) string {
-	b, _ := json.Marshal(args)
-	s := string(b)
-	if len(s) > 60 {
-		s = s[:57] + "..."
-	}
-	return s
-}
-
-var _ = argsString // suppress unused warning

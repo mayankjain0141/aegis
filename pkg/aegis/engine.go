@@ -61,7 +61,11 @@ type Engine struct {
 	sessions         map[string]*session.State
 	sessionMu        sync.Mutex
 	intentClassifier intentClassifier
-	allowlist        *allowlist.Config
+	// allowlists caches per-CWD allowlist configs loaded lazily from disk.
+	// Guarded by allowlistMu. If a fixed allowlist was provided via WithAllowlist,
+	// it is stored under the empty-string key and used for all requests.
+	allowlists   map[string]*allowlist.Config
+	allowlistMu  sync.RWMutex
 }
 
 // intentClassifier is an interface so we can wire in intent.Classifier without a hard dep.
@@ -104,14 +108,7 @@ func NewEngine(opts ...Option) (*Engine, error) {
 		extractor:     extract.NewFastExtractor(db), // AST-only for Phase 1 speed
 		fullExtractor: extract.NewExtractor(db),     // full dry-run for Phase 2
 		sessions:      make(map[string]*session.State),
-		allowlist:     allowlist.Empty(),
-	}
-
-	// Auto-load project allowlist if CWD exists
-	if cwd, err := os.Getwd(); err == nil {
-		if cfg := allowlist.Load(cwd); len(cfg.Hosts)+len(cfg.Commands)+len(cfg.PathsSafe) > 0 {
-			e.allowlist = cfg
-		}
+		allowlists:    make(map[string]*allowlist.Config),
 	}
 
 	for _, opt := range opts {
@@ -290,6 +287,7 @@ func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
 		}
 	}
 	s.Record(session.ToolCall{
+		Time:           time.Now(), // must be set for window-based rate/deny detection
 		Tool:           req.Tool,
 		ArgSummary:     argSummary,
 		Decision:       string(d.Action),
@@ -298,23 +296,21 @@ func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
 	})
 }
 
-// checkAllowlist returns (true, ruleName) if the request matches any allowlist entry.
-func (e *Engine) checkAllowlist(req *Request, argsJSON string) (bool, string) {
-	if e.allowlist == nil {
+// checkAllowlist returns (true, ruleName) if the request matches the project allowlist.
+// The allowlist is loaded from req.CWD/.aegis/allowlist.yaml (cached per CWD).
+func (e *Engine) checkAllowlist(req *Request, _ string) (bool, string) {
+	al := e.allowlistForCWD(req.CWD)
+	if al == nil {
 		return false, ""
 	}
-	// Command allowlist: match raw shell command string
 	if cmd, ok := req.Arguments["command"]; ok {
-		if cmdStr, ok := cmd.(string); ok && cmdStr != "" {
-			if e.allowlist.MatchesCommand(cmdStr) {
-				return true, "allowlist_command"
-			}
+		if cmdStr, ok := cmd.(string); ok && al.MatchesCommand(cmdStr) {
+			return true, "allowlist_command"
 		}
 	}
-	// Path allowlist: match path argument for file tools
 	for _, key := range []string{"path", "file", "filename"} {
 		if p, ok := req.Arguments[key]; ok {
-			if pathStr, ok := p.(string); ok && e.allowlist.IsSafePath(pathStr) {
+			if pathStr, ok := p.(string); ok && al.IsSafePath(pathStr) {
 				return true, "allowlist_path"
 			}
 		}
@@ -350,49 +346,65 @@ func WithIntentClassifier(c *intent.Classifier) Option {
 	return func(e *Engine) { e.intentClassifier = c }
 }
 
-// WithAllowlist loads an allowlist configuration into the engine.
-// Allowlisted commands/hosts/paths skip deny rules and return allow.
+// WithAllowlist sets a fixed allowlist used for all requests regardless of CWD.
 func WithAllowlist(cfg *allowlist.Config) Option {
-	return func(e *Engine) { e.allowlist = cfg }
+	return func(e *Engine) {
+		e.allowlistMu.Lock()
+		e.allowlists[""] = cfg // empty key = fixed for all requests
+		e.allowlistMu.Unlock()
+	}
 }
 
-// WithAllowlistFromCWD auto-loads allowlist from the given project directory.
+// WithAllowlistFromCWD pre-loads an allowlist for a specific project directory.
 func WithAllowlistFromCWD(cwd string) Option {
-	return func(e *Engine) { e.allowlist = allowlist.Load(cwd) }
-}
-
-func (e *Engine) computeSignalsFull(tool, argsJSON, cwd string) *signals.SignalBundle {
-	toolClass := signals.ClassifyTool(tool)
-	cmd := signals.AnalyzeCommand(tool, argsJSON, e.fullExtractor)
-	extraPaths := append([]string(nil), cmd.Paths...)
-	for _, c := range cmd.Commands {
-		if hasDataFile, filePath := signals.HasDataFilePattern(c.Args); hasDataFile && filePath != "" {
-			extraPaths = append(extraPaths, filePath)
-		}
-	}
-	pathSig := signals.AnalyzePathsFromArgs(tool, argsJSON, cwd, extraPaths)
-	netSig := signals.AnalyzeNetworkFromExtracted(cmd)
-	dlpSig := signals.ScanDLP(argsJSON)
-	evasionSig := signals.AnalyzeEvasion(cmd, argsJSON)
-	return &signals.SignalBundle{
-		ToolClass: toolClass,
-		Command:   cmd,
-		Path:      pathSig,
-		Network:   netSig,
-		DLP:       dlpSig,
-		Evasion:   evasionSig,
+	return func(e *Engine) {
+		e.allowlistMu.Lock()
+		e.allowlists[cwd] = allowlist.Load(cwd)
+		e.allowlistMu.Unlock()
 	}
 }
 
+// allowlistForCWD returns the allowlist for a given CWD, loading from disk on first access.
+// Returns a fixed allowlist if one was set via WithAllowlist.
+func (e *Engine) allowlistForCWD(cwd string) *allowlist.Config {
+	// Check for a fixed allowlist (set via WithAllowlist)
+	e.allowlistMu.RLock()
+	if fixed, ok := e.allowlists[""]; ok {
+		e.allowlistMu.RUnlock()
+		return fixed
+	}
+	if cached, ok := e.allowlists[cwd]; ok {
+		e.allowlistMu.RUnlock()
+		return cached
+	}
+	e.allowlistMu.RUnlock()
+
+	// Load from disk and cache
+	cfg := allowlist.Load(cwd)
+	e.allowlistMu.Lock()
+	e.allowlists[cwd] = cfg
+	e.allowlistMu.Unlock()
+	return cfg
+}
+
+// computeSignals computes all 6 Phase 1 signals using the fast (AST-only) extractor.
+// Applies allowlist mutations before returning.
 func (e *Engine) computeSignals(tool, argsJSON, cwd string) *signals.SignalBundle {
-	// Signal 1: tool classification
+	return e.computeSignalsWithExtractor(tool, argsJSON, cwd, e.extractor, true)
+}
+
+// computeSignalsFull recomputes signals using the full extractor (with dry-run) for Phase 2.
+func (e *Engine) computeSignalsFull(tool, argsJSON, cwd string) *signals.SignalBundle {
+	return e.computeSignalsWithExtractor(tool, argsJSON, cwd, e.fullExtractor, true)
+}
+
+// computeSignalsWithExtractor is the shared implementation for both Phase 1 and Phase 2.
+// applyAllowlist controls whether allowlist mutations are applied to the resulting bundle.
+func (e *Engine) computeSignalsWithExtractor(tool, argsJSON, cwd string, ext *extract.Extractor, applyAllowlist bool) *signals.SignalBundle {
 	toolClass := signals.ClassifyTool(tool)
+	cmd := signals.AnalyzeCommand(tool, argsJSON, ext)
 
-	// Signal 2: command analysis (uses extractor for AST parsing)
-	cmd := signals.AnalyzeCommand(tool, argsJSON, e.extractor)
-
-	// Signal 3: path analysis — combine paths from shell extractor + direct args
-	// Also detect @file patterns in curl/wget commands
+	// Collect @file paths from data-upload flags (e.g. curl -d @/etc/passwd)
 	extraPaths := append([]string(nil), cmd.Paths...)
 	for _, c := range cmd.Commands {
 		if hasDataFile, filePath := signals.HasDataFilePattern(c.Args); hasDataFile && filePath != "" {
@@ -400,50 +412,53 @@ func (e *Engine) computeSignals(tool, argsJSON, cwd string) *signals.SignalBundl
 		}
 	}
 	pathSig := signals.AnalyzePathsFromArgs(tool, argsJSON, cwd, extraPaths)
-
-	// Apply path allowlist: downgrade "sensitive" classification for explicitly safe paths
-	if e.allowlist != nil {
-		for i := range pathSig.Paths {
-			if pathSig.Paths[i].Sensitive && e.allowlist.IsSafePath(pathSig.Paths[i].Raw) {
-				pathSig.Paths[i].Sensitive = false
-			}
-		}
-		// Recompute HasSensitive
-		pathSig.HasSensitive = false
-		for _, p := range pathSig.Paths {
-			if p.Sensitive {
-				pathSig.HasSensitive = true
-				break
-			}
-		}
-	}
-
-	// Signal 4: network analysis — use hosts extracted from shell commands
-	// Apply host allowlist: mark configured hosts as known-safe
 	netSig := signals.AnalyzeNetworkFromExtracted(cmd)
-	if e.allowlist != nil {
-		for i := range netSig.Hosts {
-			if !netSig.Hosts[i].IsKnownSafe && e.allowlist.IsAllowedHost(netSig.Hosts[i].Host) {
-				netSig.Hosts[i].IsKnownSafe = true
-			}
-		}
-		// Recompute score with updated host classifications
-		netSig = signals.RecomputeNetworkScore(netSig)
-	}
-
-	// Signal 5: DLP scan
 	dlpSig := signals.ScanDLP(argsJSON)
-
-	// Signal 6: evasion indicators
 	evasionSig := signals.AnalyzeEvasion(cmd, argsJSON)
 
-	return &signals.SignalBundle{
+	bundle := &signals.SignalBundle{
 		ToolClass: toolClass,
 		Command:   cmd,
 		Path:      pathSig,
 		Network:   netSig,
 		DLP:       dlpSig,
 		Evasion:   evasionSig,
+	}
+
+	if applyAllowlist {
+		if al := e.allowlistForCWD(cwd); al != nil {
+			e.applyAllowlistMutations(bundle, al)
+		}
+	}
+	return bundle
+}
+
+// applyAllowlistMutations mutates a signal bundle to reflect project allowlist exceptions.
+func (e *Engine) applyAllowlistMutations(bundle *signals.SignalBundle, al *allowlist.Config) {
+	// Downgrade sensitive flag for explicitly allow-listed paths
+	for i := range bundle.Path.Paths {
+		if bundle.Path.Paths[i].Sensitive && al.IsSafePath(bundle.Path.Paths[i].Raw) {
+			bundle.Path.Paths[i].Sensitive = false
+		}
+	}
+	bundle.Path.HasSensitive = false
+	for _, p := range bundle.Path.Paths {
+		if p.Sensitive {
+			bundle.Path.HasSensitive = true
+			break
+		}
+	}
+
+	// Mark configured hosts as known-safe, then recompute network score
+	changed := false
+	for i := range bundle.Network.Hosts {
+		if !bundle.Network.Hosts[i].IsKnownSafe && al.IsAllowedHost(bundle.Network.Hosts[i].Host) {
+			bundle.Network.Hosts[i].IsKnownSafe = true
+			changed = true
+		}
+	}
+	if changed {
+		bundle.Network = signals.RecomputeNetworkScore(bundle.Network)
 	}
 }
 

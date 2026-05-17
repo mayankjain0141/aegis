@@ -2,7 +2,6 @@ package signals
 
 import (
 	"regexp"
-	"strings"
 )
 
 // EvasionSignal is Signal 6: evasion technique detection.
@@ -138,21 +137,3 @@ func computeEvasionScore(sig *EvasionSignal) float64 {
 	return score
 }
 
-// checkStdinPipe detects patterns like `cat file | curl` or `< file curl`
-func checkStdinPipe(cmdStr string) bool {
-	stdinPipePattern := regexp.MustCompile(
-		`(?i)(cat\s+\S+\s*\|\s*(curl|wget|nc|socat)|<\s*\S+\s+(curl|wget|nc|socat))`,
-	)
-	return stdinPipePattern.MatchString(cmdStr)
-}
-
-// detectWrappers returns wrappers found at the start of args
-func detectWrappers(args []string) []string {
-	var wrappers []string
-	for _, arg := range args {
-		if commandWrappers[strings.TrimPrefix(arg, "/")] {
-			wrappers = append(wrappers, arg)
-		}
-	}
-	return wrappers
-}

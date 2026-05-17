@@ -36,7 +36,7 @@ type WAL struct {
 
 // Open opens or creates the WAL file at path.
 func Open(path string) (*WAL, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)

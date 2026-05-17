@@ -161,7 +161,16 @@ func (f *Filter) Export() (data []uint64, m, k int) {
 }
 
 // Import restores bloom filter state from persisted data.
+// Returns an empty filter if the parameters are inconsistent, preventing panics
+// from out-of-bounds bit indexing on corrupted persistence data.
 func Import(data []uint64, m, k int) *Filter {
+	if m <= 0 || k <= 0 {
+		return New(100, 0.01)
+	}
+	expected := (m + 63) / 64
+	if len(data) != expected {
+		return New(100, 0.01) // corrupted — return empty rather than panic
+	}
 	f := &Filter{
 		data: make([]uint64, len(data)),
 		m:    m,

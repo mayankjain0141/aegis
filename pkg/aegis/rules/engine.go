@@ -31,7 +31,9 @@ type Rule struct {
 func Evaluate(rules []Rule, bundle *signals.SignalBundle) (Rule, bool) {
 	sorted := make([]Rule, len(rules))
 	copy(sorted, rules)
-	sort.Slice(sorted, func(i, j int) bool {
+	// SliceStable preserves source-order for equal priorities, making
+	// evaluation order deterministic even when priorities collide.
+	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].Priority < sorted[j].Priority
 	})
 

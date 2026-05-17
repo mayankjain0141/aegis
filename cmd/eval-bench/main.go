@@ -730,7 +730,7 @@ func runSequenceEval(engine *aegis.Engine) {
 	if benign > 0 {
 		fmt.Printf("  Benign sequence FP rate:  %d/%d (%.1f%%)\n", benign-benignPass, benign, 100*float64(benign-benignPass)/float64(benign))
 	}
-	fmt.Println("  ══════════════════════════════════════════════\n")
+	fmt.Println("  ══════════════════════════════════════════════")
 
 	if attacks > 0 {
 		attackRate := float64(attackPass) / float64(attacks)

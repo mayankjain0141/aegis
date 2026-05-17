@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/mayjain/aegis/pkg/aegis"
 )
@@ -48,7 +49,13 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/evaluate", s.handleEvaluate)
 	mux.HandleFunc("/health", s.handleHealth)
 
-	s.httpServer = &http.Server{Handler: mux}
+	s.httpServer = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	go func() {
 		<-ctx.Done()
