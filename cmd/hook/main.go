@@ -92,6 +92,13 @@ func init() {
 	}
 }
 
+// closeWAL flushes and closes the WAL. Called via defer in main.
+func closeWAL() {
+	if wal != nil {
+		wal.Close() //nolint:errcheck
+	}
+}
+
 func main() {
 	// Fail-open on empty input to avoid breaking the IDE
 	input, err := io.ReadAll(os.Stdin)
@@ -102,6 +109,9 @@ func main() {
 
 	// req is declared before the defer so the panic recovery can log it to the WAL.
 	var req *normalizedRequest
+
+	// Ensure WAL is flushed before process exits (Cursor invokes us per-call, so exit is frequent)
+	defer closeWAL()
 
 	// Fail-open on engine panics; write a panic event to the WAL before allowing.
 	defer func() {

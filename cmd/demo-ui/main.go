@@ -19,9 +19,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mayjain/aegis/pkg/aegis"
@@ -101,6 +103,8 @@ type Server struct {
 	paused     bool
 	pauseMu    sync.Mutex
 	llmEnabled bool
+	ctx        context.Context    // cancelled on shutdown — stops scenario goroutines
+	cancel     context.CancelFunc
 }
 
 type RingBuffer struct {
@@ -722,19 +726,28 @@ func (s *Server) runScenario(name string) {
 		steps = scenarios["attack_sequence"]
 	}
 	sid := sessionID()
-	// Phase 2 cascade needs a stable agentID so session state persists across steps
-	// Phase 3 cascade uses a fresh agentID per run (no prior session = clean Phase 3 trigger)
 	agentID := "cursor-claude-" + sid
 	if name == "phase3_cascade" {
 		agentID = "" // no session → Phase 2 skips → Phase 3 fires on ESCALATE
 	}
 
 	for _, step := range steps {
+		// Stop immediately on shutdown signal
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+
 		s.pauseMu.Lock()
 		paused := s.paused
 		s.pauseMu.Unlock()
 		if paused {
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 			continue
 		}
 
@@ -745,7 +758,11 @@ func (s *Server) runScenario(name string) {
 		if delay == 0 {
 			delay = 800
 		}
-		time.Sleep(time.Duration(delay) * time.Millisecond)
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-time.After(time.Duration(delay) * time.Millisecond):
+		}
 	}
 }
 
@@ -772,12 +789,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	srvCtx, srvCancel := context.WithCancel(context.Background())
 	srv := &Server{
-		engine:        engine,
-		ring:          &RingBuffer{},
-		clients:       make(map[chan []byte]struct{}),
-		log:           log,
-		llmEnabled:    classifier != nil,
+		engine:     engine,
+		ring:       &RingBuffer{},
+		clients:    make(map[chan []byte]struct{}),
+		log:        log,
+		llmEnabled: classifier != nil,
+		ctx:        srvCtx,
+		cancel:     srvCancel,
 	}
 
 	// Static files
@@ -813,36 +833,69 @@ func main() {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Error("listen failed", "addr", addr, "error", err)
+		log.Error("listen failed — another instance may be running",
+			"addr", addr,
+			"hint", "Ctrl+C the other terminal, or set AEGIS_DEMO_PORT=7475",
+			"error", err,
+		)
 		os.Exit(1)
 	}
 
 	url := "http://" + addr
 	log.Info("Aegis Control Plane", "url", url)
-	fmt.Printf("\n  \033[1m\033[36mÆ\033[0m  Aegis Control Plane  →  \033[1m%s\033[0m\n\n", url)
-
-	// Auto-open browser
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		openBrowser(url)
-	}()
-
-	// Auto-start attack sequence after 2s
-	go func() {
-		time.Sleep(2 * time.Second)
-		srv.runScenario("full_demo")
-	}()
+	fmt.Printf("\n  \033[1m\033[36mÆ\033[0m  Aegis Control Plane  →  \033[1m%s\033[0m\n", url)
+	fmt.Printf("  Press Ctrl+C to stop\n\n")
 
 	httpServer := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0, // SSE needs no write timeout
+		WriteTimeout:      0, // SSE streams have no write timeout
 	}
 
-	if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+	// Graceful shutdown on SIGINT / SIGTERM
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Auto-open browser
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		openBrowser(url)
+	}()
+
+	// Auto-start demo scenario
+	go func() {
+		time.Sleep(2 * time.Second)
+		srv.runScenario("full_demo")
+	}()
+
+	// Serve in background
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
+		}
+	}()
+
+	// Wait for signal or serve error
+	select {
+	case <-ctx.Done():
+		fmt.Printf("\n  \033[2mShutting down…\033[0m\n")
+	case err := <-serveErr:
 		log.Error("server error", "error", err)
+		os.Exit(1)
 	}
+
+	// Cancel server context — stops all scenario goroutines immediately
+	srv.cancel()
+
+	// Give in-flight requests 5s to finish
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Warn("shutdown timeout", "error", err)
+	}
+	fmt.Printf("  \033[2mDone.\033[0m\n\n")
 }
 
 // tryBuildClassifier creates a real LLM classifier from env vars.
