@@ -233,16 +233,16 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 				return d3
 			}
 			d3 := applyPhase3Rules(sig, composite)
-			e.recordCall(req, d3, composite)
+			e.recordCallWithBundle(req, d3, composite, bundle)
 			return d3
 		}
 	}
 
 	if d2matched {
-		e.recordCall(req, d2, composite)
+		e.recordCallWithBundle(req, d2, composite, bundle)
 		return d2
 	}
-	e.recordCall(req, d1, composite)
+	e.recordCallWithBundle(req, d1, composite, bundle)
 	return d1
 }
 
@@ -273,7 +273,13 @@ func (e *Engine) getOrCreateSession(agentID string) *session.State {
 	return s
 }
 
+// recordCallWithBundle records a tool call into session state.
+// bundle may be nil when recording fast-path decisions that skipped signal computation.
 func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
+	e.recordCallWithBundle(req, d, composite, nil)
+}
+
+func (e *Engine) recordCallWithBundle(req *Request, d *Decision, composite float64, bundle *signals.SignalBundle) {
 	if req.AgentID == "" {
 		return
 	}
@@ -293,22 +299,28 @@ func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
 	primaryVerb := ""
 	if cmd, ok := req.Arguments["command"]; ok {
 		if cmdStr, ok := cmd.(string); ok && cmdStr != "" {
-			// Extract first word as a rough primary verb for retry detection
 			fields := strings.Fields(cmdStr)
 			if len(fields) > 0 {
 				primaryVerb = fields[0]
 			}
 		}
 	}
-	s.Record(session.ToolCall{
-		Time:           time.Now(), // must be set for window-based rate/deny detection
+	tc := session.ToolCall{
+		Time:           time.Now(),
 		Tool:           req.Tool,
 		ArgSummary:     argSummary,
 		PrimaryVerb:    primaryVerb,
 		Decision:       string(d.Action),
 		Rule:           d.Rule,
 		CompositeScore: composite,
-	})
+	}
+	// Propagate path context so Phase 2 sequence rules can detect
+	// exfil_after_sensitive_read and escalating_access patterns.
+	if bundle != nil {
+		tc.PathSensitive = bundle.Path.HasSensitive
+		tc.PathCritical = bundle.Path.HasCritical
+	}
+	s.Record(tc)
 }
 
 // checkAllowlist returns (true, ruleName) if the request matches the project allowlist.
@@ -337,11 +349,13 @@ func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signa
 	entries := make([]signals.SessionHistoryEntry, len(calls))
 	for i, c := range calls {
 		entries[i] = signals.SessionHistoryEntry{
-			Tool:           c.Tool,
-			ArgSummary:     c.ArgSummary,
-			Decision:       c.Decision,
-			Rule:           c.Rule,
+			Tool:          c.Tool,
+			ArgSummary:    c.ArgSummary,
+			Decision:      c.Decision,
+			Rule:          c.Rule,
 			CompositeScore: c.CompositeScore,
+			PathSensitive: c.PathSensitive, // enables exfil_after_sensitive_read detection
+			PathCritical:  c.PathCritical,  // enables escalating_access detection
 		}
 	}
 	return entries

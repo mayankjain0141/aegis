@@ -16,6 +16,10 @@ type ToolCall struct {
 	Decision       string  // "allow", "deny", "escalate"
 	Rule           string  // which rule fired
 	CompositeScore float64
+	// Path context — enables exfil_after_sensitive_read sequence detection.
+	// These must be populated from the signal bundle in engine.recordCall.
+	PathSensitive bool
+	PathCritical  bool
 }
 
 // DenyEvent records a deny decision for retry detection.

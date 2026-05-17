@@ -688,15 +688,27 @@ var scenarios = map[string][]demoStep{
 //   rm /var/log/*.log — verb danger 0.80, path not critical/sensitive, not in project
 //   → Phase 1: shell_no_rule_matched (ESCALATE, conf=0.60 < 0.85)
 //   → Phase 2: sees prior deny verb="rm" within 60s → retry_after_deny → DENY
+// Phase 2 cascade — shows what ONLY behavioral context can catch:
+//
+//   Step 1-2: Baseline dev work (P1 allows with high confidence)
+//   Step 3: python3 socket call → P1 ESCALATE (uncertain interpreter, verb recorded)
+//   Step 4: another python3 script → P1 ESCALATE → P2 sees same verb escalated before
+//            → retry_after_deny → DENY
+//   Step 5: same again — P2 still fires within 60s window
+//
+// Key insight: each python3 call looks innocent to Phase 1.
+// Only Phase 2 knows the pattern is suspicious.
 var phase2Steps = []demoStep{
-	{"git status (baseline)", "Shell", map[string]any{"command": "git status"}, 800},
-	{"npm install (baseline)", "Shell", map[string]any{"command": "npm install"}, 700},
-	// Step 3: Phase 1 DENY with high confidence → verb "rm" recorded in session
-	{"rm -rf /etc [P1→DENY, records verb=rm in session]", "Shell", map[string]any{"command": "rm -rf /etc"}, 1400},
-	// Step 4: Phase 1 ESCALATE (0.60) → Phase 2 sees verb "rm" was denied 1s ago → retry_after_deny → DENY
-	{"rm /var/log/app.log [P1→ESCALATE→P2 retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm /var/log/app.log"}, 1200},
-	// Step 5: Same pattern — Phase 2 still fires within 60s window
-	{"rm /var/run/myapp.pid [P1→ESCALATE→P2 retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm /var/run/myapp.pid"}, 1000},
+	{"git status [P1→ALLOW, benign_git_ops]", "Shell", map[string]any{"command": "git status"}, 800},
+	{"npm install [P1→ALLOW, benign_package_mgr]", "Shell", map[string]any{"command": "npm install"}, 700},
+	// Phase 1 can only ESCALATE python3 — it doesn't know what the script does
+	{"python3 suspicious_socket.py [P1→ESCALATE, verb recorded]", "Shell",
+		map[string]any{"command": `python3 -c "import socket; s=socket.socket(); s.connect(('10.0.0.1',9000))"`}, 1400},
+	// Phase 1 escalates again — but now Phase 2 sees: same verb was already suspicious
+	{"python3 send_report.py [P1→ESCALATE→P2→retry_after_deny→DENY]", "Shell",
+		map[string]any{"command": "python3 send_report.py"}, 1200},
+	{"python3 upload_data.py [P1→ESCALATE→P2→retry_after_deny→DENY]", "Shell",
+		map[string]any{"command": "python3 upload_data.py"}, 1000},
 }
 
 // Commands that Phase 1 ESCALATEs (confidence < 0.85) — genuinely ambiguous for LLM

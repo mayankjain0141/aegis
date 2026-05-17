@@ -77,11 +77,11 @@ func New(model, apiKeyEnv string, maxCallsPerMin int) (*Classifier, error) {
 		// 
 		transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
 		c := &Classifier{
-			client:  &http.Client{Timeout: 30 * time.Second, Transport: transport},
+			client:  &http.Client{Timeout: 12 * time.Second, Transport: transport},
 			model:   model,
 			apiKey:  key,
 			baseURL: baseURL,
-			timeout: 30 * time.Second,
+			timeout: 12 * time.Second,
 			budget:  newRateLimiter(maxCallsPerMin),
 		}
 		c.totalCost.Store(float64(0))
@@ -111,11 +111,11 @@ func New(model, apiKeyEnv string, maxCallsPerMin int) (*Classifier, error) {
 	}
 
 	c := &Classifier{
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: 12 * time.Second},
 		model:   model,
 		apiKey:  key,
 		baseURL: baseURL,
-		timeout: 30 * time.Second,
+		timeout: 12 * time.Second,
 		budget:  newRateLimiter(maxCallsPerMin),
 	}
 	c.totalCost.Store(float64(0))
@@ -155,37 +155,38 @@ func (c *Classifier) Classify(ctx context.Context, req *ClassifyRequest) (*Inten
 }
 
 func buildPrompt(req *ClassifyRequest) string {
-	argsJSON, _ := json.Marshal(req.Args)
+	// Keep the command itself — truncate long payloads
+	cmd := ""
+	if c, ok := req.Args["command"]; ok {
+		if s, ok := c.(string); ok {
+			cmd = s
+			if len(cmd) > 200 {
+				cmd = cmd[:200] + "…"
+			}
+		}
+	}
 
-	context := ""
+	recent := ""
 	for _, e := range req.SessionLast {
-		context += fmt.Sprintf("  - %ds ago: %s(%s)\n", e.AgoS, e.Tool, e.Summary)
+		if recent != "" {
+			recent += "; "
+		}
+		sum := e.Summary
+		if len(sum) > 40 {
+			sum = sum[:40]
+		}
+		recent += fmt.Sprintf("%s(%ds ago)", sum, e.AgoS)
 	}
-	if context == "" {
-		context = "  (no recent calls)\n"
+	if recent == "" {
+		recent = "none"
 	}
 
-	projectCtx := ""
-	if req.ProjectLang != "" {
-		projectCtx = fmt.Sprintf("\nProject type: %s", req.ProjectLang)
-	}
-
-	return fmt.Sprintf(`You are a security classifier for AI agent tool calls. Classify the intent of this tool call.
-
-Tool: %s
-Arguments: %s%s
-
-Recent session context:
-%s
-Respond with ONLY valid JSON (no markdown, no explanation):
-{"intent": "legitimate|suspicious|malicious", "confidence": 0.0-1.0, "reasoning": "one sentence"}
-
-Guidelines:
-- "legitimate": normal development work (building, testing, deploying, reading docs)
-- "suspicious": unusual but possibly justified; needs human review
-- "malicious": clearly attempting unauthorized access, exfiltration, or destruction
-- confidence should reflect your certainty; if uncertain use 0.5-0.6`,
-		req.Tool, string(argsJSON), projectCtx, context)
+	// Ultra-compact prompt — minimises tokens in/out for fastest response.
+	// The model only needs to output a tiny JSON object.
+	return fmt.Sprintf(
+		"Security classifier. Tool: %s. Command: %q. Session: %s.\n"+
+			`Respond with ONLY this JSON (no markdown): {"intent":"legitimate|suspicious|malicious","confidence":0.0-1.0,"reasoning":"<10 words"}`,
+		req.Tool, cmd, recent)
 }
 
 type openAIResponse struct {
@@ -203,7 +204,7 @@ func (c *Classifier) callLLM(ctx context.Context, prompt string) (string, string
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"max_tokens":  256,
+		"max_tokens":  60,
 		"temperature": 0,
 	})
 
