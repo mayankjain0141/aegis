@@ -1,13 +1,8 @@
-.PHONY: build install smoke test test-attacks bench up down logs watch demo demo-live lint fmt ci hello integration demo-e2e demo-hitl eval-bench eval hook
+.PHONY: build install smoke test test-attacks bench up down logs lint fmt ci hello integration eval-bench eval hook demo-ui demo-terminal
 
 build:
 	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
 	go build -buildvcs=false -o bin/aegis-shim ./cmd/shim
-	go build -buildvcs=false -o bin/aegis-watch ./cmd/watch
-	go build -buildvcs=false -o bin/mock-tool ./test/mock
-	go build -buildvcs=false -o bin/aegis-real-tool ./cmd/real-tool
-	go build -buildvcs=false -o bin/demo-e2e ./cmd/demo-e2e
-	go build -buildvcs=false -o bin/demo-hitl ./cmd/demo-hitl
 	go build -buildvcs=false -o bin/aegis ./cmd/aegis
 	go build -buildvcs=false -o .cursor/hooks/aegis ./cmd/hook
 
@@ -86,3 +81,14 @@ hook:
 	@go build -o .cursor/hooks/aegis ./cmd/hook/
 	@chmod +x .cursor/hooks/aegis
 	@echo "Hook installed at .cursor/hooks/aegis"
+
+# ── Demo targets ──────────────────────────────────────────────────────────
+
+demo-ui:
+	@echo "Building Aegis Control Plane dashboard..."
+	@go build -o /tmp/aegis-demo-ui ./cmd/demo-ui/
+	@echo "Starting at http://localhost:7474"
+	@/tmp/aegis-demo-ui
+
+demo-terminal:
+	@go run ./cmd/demo-v2/

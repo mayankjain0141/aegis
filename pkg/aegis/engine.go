@@ -343,6 +343,18 @@ func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signa
 	return entries
 }
 
+// ComputeSignals computes all 6 signals for a tool call without evaluating rules.
+// Used by observability and demo tooling to visualize signal breakdown.
+func (e *Engine) ComputeSignals(tool, command, cwd string) *signals.SignalBundle {
+	argsJSON := marshalArgs(map[string]any{"command": command})
+	return e.computeSignals(tool, argsJSON, cwd)
+}
+
+// ExportSignals is an alias for ComputeSignals for use in demo/observability code.
+func (e *Engine) ExportSignals(tool, command, cwd string) *signals.SignalBundle {
+	return e.ComputeSignals(tool, command, cwd)
+}
+
 // EvaluateJSON is a convenience wrapper that accepts raw JSON arguments string.
 func (e *Engine) EvaluateJSON(ctx context.Context, tool, argsJSON, cwd string) *Decision {
 	var args map[string]any
