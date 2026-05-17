@@ -229,6 +229,12 @@ func hasDataFlags(args []string) bool {
 	return false
 }
 
+// RecomputeNetworkScore updates a NetworkSignal's score after host classifications change.
+func RecomputeNetworkScore(sig NetworkSignal) NetworkSignal {
+	sig.Score = computeNetworkScore(&sig)
+	return sig
+}
+
 func computeNetworkScore(sig *NetworkSignal) float64 {
 	if len(sig.Hosts) == 0 {
 		return 0.00

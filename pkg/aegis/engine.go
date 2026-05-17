@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mayjain/aegis/internal/extract"
+	"github.com/mayjain/aegis/pkg/aegis/allowlist"
 	"github.com/mayjain/aegis/pkg/aegis/bloom"
 	"github.com/mayjain/aegis/pkg/aegis/intent"
 	"github.com/mayjain/aegis/pkg/aegis/rules"
@@ -53,13 +54,14 @@ type Decision struct {
 
 // Engine is the V2 risk evaluation engine.
 type Engine struct {
-	rules          []rules.Rule
-	bloom          *bloom.Filter
-	extractor      *extract.Extractor // fast (AST-only) for Phase 1
-	fullExtractor  *extract.Extractor // full (with dry-run) for Phase 2
-	sessions       map[string]*session.State
-	sessionMu      sync.Mutex
+	rules            []rules.Rule
+	bloom            *bloom.Filter
+	extractor        *extract.Extractor // fast (AST-only) for Phase 1
+	fullExtractor    *extract.Extractor // full (with dry-run) for Phase 2
+	sessions         map[string]*session.State
+	sessionMu        sync.Mutex
 	intentClassifier intentClassifier
+	allowlist        *allowlist.Config
 }
 
 // intentClassifier is an interface so we can wire in intent.Classifier without a hard dep.
@@ -102,6 +104,14 @@ func NewEngine(opts ...Option) (*Engine, error) {
 		extractor:     extract.NewFastExtractor(db), // AST-only for Phase 1 speed
 		fullExtractor: extract.NewExtractor(db),     // full dry-run for Phase 2
 		sessions:      make(map[string]*session.State),
+		allowlist:     allowlist.Empty(),
+	}
+
+	// Auto-load project allowlist if CWD exists
+	if cwd, err := os.Getwd(); err == nil {
+		if cfg := allowlist.Load(cwd); len(cfg.Hosts)+len(cfg.Commands)+len(cfg.PathsSafe) > 0 {
+			e.allowlist = cfg
+		}
 	}
 
 	for _, opt := range opts {
@@ -129,6 +139,13 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	key := bloom.CanonicalKey(req.Tool, req.Arguments)
 	if e.bloom.Contains(key) {
 		d := &Decision{Action: ActionAllow, Rule: "fast_path_allow", Confidence: 1.00, Phase: 0}
+		e.recordCall(req, d, 0.0)
+		return d
+	}
+
+	// Allowlist fast path: check project/user allowlist before rule evaluation
+	if allow, rule := e.checkAllowlist(req, argsJSON); allow {
+		d := &Decision{Action: ActionAllow, Rule: rule, Confidence: 1.00, Phase: 0}
 		e.recordCall(req, d, 0.0)
 		return d
 	}
@@ -281,6 +298,30 @@ func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
 	})
 }
 
+// checkAllowlist returns (true, ruleName) if the request matches any allowlist entry.
+func (e *Engine) checkAllowlist(req *Request, argsJSON string) (bool, string) {
+	if e.allowlist == nil {
+		return false, ""
+	}
+	// Command allowlist: match raw shell command string
+	if cmd, ok := req.Arguments["command"]; ok {
+		if cmdStr, ok := cmd.(string); ok && cmdStr != "" {
+			if e.allowlist.MatchesCommand(cmdStr) {
+				return true, "allowlist_command"
+			}
+		}
+	}
+	// Path allowlist: match path argument for file tools
+	for _, key := range []string{"path", "file", "filename"} {
+		if p, ok := req.Arguments[key]; ok {
+			if pathStr, ok := p.(string); ok && e.allowlist.IsSafePath(pathStr) {
+				return true, "allowlist_path"
+			}
+		}
+	}
+	return false, ""
+}
+
 func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signals.SessionHistoryEntry {
 	entries := make([]signals.SessionHistoryEntry, len(calls))
 	for i, c := range calls {
@@ -307,6 +348,17 @@ func (e *Engine) EvaluateJSON(ctx context.Context, tool, argsJSON, cwd string) *
 // WithIntentClassifier wires a Phase 3 LLM intent classifier into the engine.
 func WithIntentClassifier(c *intent.Classifier) Option {
 	return func(e *Engine) { e.intentClassifier = c }
+}
+
+// WithAllowlist loads an allowlist configuration into the engine.
+// Allowlisted commands/hosts/paths skip deny rules and return allow.
+func WithAllowlist(cfg *allowlist.Config) Option {
+	return func(e *Engine) { e.allowlist = cfg }
+}
+
+// WithAllowlistFromCWD auto-loads allowlist from the given project directory.
+func WithAllowlistFromCWD(cwd string) Option {
+	return func(e *Engine) { e.allowlist = allowlist.Load(cwd) }
 }
 
 func (e *Engine) computeSignalsFull(tool, argsJSON, cwd string) *signals.SignalBundle {
@@ -349,8 +401,35 @@ func (e *Engine) computeSignals(tool, argsJSON, cwd string) *signals.SignalBundl
 	}
 	pathSig := signals.AnalyzePathsFromArgs(tool, argsJSON, cwd, extraPaths)
 
+	// Apply path allowlist: downgrade "sensitive" classification for explicitly safe paths
+	if e.allowlist != nil {
+		for i := range pathSig.Paths {
+			if pathSig.Paths[i].Sensitive && e.allowlist.IsSafePath(pathSig.Paths[i].Raw) {
+				pathSig.Paths[i].Sensitive = false
+			}
+		}
+		// Recompute HasSensitive
+		pathSig.HasSensitive = false
+		for _, p := range pathSig.Paths {
+			if p.Sensitive {
+				pathSig.HasSensitive = true
+				break
+			}
+		}
+	}
+
 	// Signal 4: network analysis — use hosts extracted from shell commands
+	// Apply host allowlist: mark configured hosts as known-safe
 	netSig := signals.AnalyzeNetworkFromExtracted(cmd)
+	if e.allowlist != nil {
+		for i := range netSig.Hosts {
+			if !netSig.Hosts[i].IsKnownSafe && e.allowlist.IsAllowedHost(netSig.Hosts[i].Host) {
+				netSig.Hosts[i].IsKnownSafe = true
+			}
+		}
+		// Recompute score with updated host classifications
+		netSig = signals.RecomputeNetworkScore(netSig)
+	}
 
 	// Signal 5: DLP scan
 	dlpSig := signals.ScanDLP(argsJSON)

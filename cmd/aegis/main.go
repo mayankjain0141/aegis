@@ -2,16 +2,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/mayjain/aegis/pkg/aegis"
+	"github.com/mayjain/aegis/pkg/aegis/server"
 	"github.com/mayjain/aegis/pkg/aegis/telemetry"
 )
 
@@ -415,31 +422,124 @@ const daemonSocketPath = "/tmp/aegis-daemon.sock"
 
 func cmdDaemon(args []string) {
 	if len(args) == 0 {
-		fatalf("usage: aegis daemon <start|stop|status>")
+		fatalf("usage: aegis daemon <start|stop|status|run>")
 	}
 	switch args[0] {
+	case "run":
+		// Internal: run the daemon in-process (called by "start" via background exec)
+		runDaemonInProcess()
+
 	case "start":
-		fmt.Println("Starting aegis daemon...")
-		fmt.Printf("Socket: %s\n", daemonSocketPath)
-		fmt.Println("Run the daemon binary directly: go run ./cmd/daemon/")
+		if isDaemonRunning() {
+			fmt.Println("Daemon already running.")
+			fmt.Printf("Socket: %s\n", daemonSocketPath)
+			return
+		}
+		// Re-exec this binary with "daemon run" as a background process
+		self, err := os.Executable()
+		if err != nil {
+			fatalf("cannot find own executable: %v", err)
+		}
+		logFile := filepath.Join(os.Getenv("HOME"), ".aegis", "daemon.log")
+		os.MkdirAll(filepath.Dir(logFile), 0o755) //nolint:errcheck
+		f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+
+		cmd := exec.Command(self, "daemon", "run")
+		cmd.Stdout = f
+		cmd.Stderr = f
+		if err := cmd.Start(); err != nil {
+			fatalf("failed to start daemon: %v", err)
+		}
+		// Save PID before Release() clears it on some platforms
+		pid := cmd.Process.Pid
+		os.WriteFile(daemonPIDFile, []byte(fmt.Sprintf("%d\n", pid)), 0o644) //nolint:errcheck
+		cmd.Process.Release() //nolint:errcheck
+
+		// Wait for socket to appear (up to 3s)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if isDaemonRunning() {
+				fmt.Printf("Daemon started (PID %d)\n", pid)
+				fmt.Printf("Socket: %s\n", daemonSocketPath)
+				fmt.Printf("Log: %s\n", logFile)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		fmt.Println("Daemon started (socket not yet ready — it may take a moment)")
+
 	case "stop":
 		data, err := os.ReadFile(daemonPIDFile)
 		if err != nil {
 			fmt.Println("Daemon not running (no PID file)")
 			return
 		}
-		fmt.Printf("Sending SIGTERM to PID %s\n", strings.TrimSpace(string(data)))
-		os.Remove(daemonPIDFile) //nolint:errcheck
-	case "status":
-		if _, err := os.Stat(daemonPIDFile); err != nil {
-			fmt.Println("Status: not running")
-		} else {
-			data, _ := os.ReadFile(daemonPIDFile)
-			fmt.Printf("Status: running (PID %s)\n", strings.TrimSpace(string(data)))
+		pidStr := strings.TrimSpace(string(data))
+		var pid int
+		fmt.Sscanf(pidStr, "%d", &pid)
+		if pid > 0 {
+			proc, err := os.FindProcess(pid)
+			if err == nil {
+				proc.Signal(syscall.SIGTERM) //nolint:errcheck
+				fmt.Printf("Sent SIGTERM to PID %d\n", pid)
+			}
 		}
+		os.Remove(daemonPIDFile)  //nolint:errcheck
+		os.Remove(daemonSocketPath) //nolint:errcheck
+
+	case "status":
+		if isDaemonRunning() {
+			data, _ := os.ReadFile(daemonPIDFile)
+			fmt.Printf("Status: running (PID %s, socket %s)\n",
+				strings.TrimSpace(string(data)), daemonSocketPath)
+		} else {
+			fmt.Println("Status: not running")
+		}
+
 	default:
 		fatalf("unknown daemon subcommand: %s", args[0])
 	}
+}
+
+func isDaemonRunning() bool {
+	conn, err := net.DialTimeout("unix", daemonSocketPath, 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// runDaemonInProcess starts the session-aware HTTP server and blocks.
+func runDaemonInProcess() {
+	fmt.Fprintf(os.Stderr, "aegis-daemon: starting on %s\n", daemonSocketPath)
+
+	engine, err := aegis.NewEngine()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aegis-daemon: engine init failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	srv := server.New(engine, daemonSocketPath)
+
+	// Write PID if not already written by parent
+	if _, err := os.Stat(daemonPIDFile); os.IsNotExist(err) {
+		os.WriteFile(daemonPIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644) //nolint:errcheck
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	defer func() {
+		os.Remove(daemonPIDFile)  //nolint:errcheck
+		os.Remove(daemonSocketPath) //nolint:errcheck
+	}()
+
+	if err := srv.Start(ctx); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(os.Stderr, "aegis-daemon: server error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "aegis-daemon: shutdown\n")
 }
 
 func cmdTelemetry(args []string) {
