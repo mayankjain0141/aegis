@@ -20,6 +20,11 @@ func Phase1Rules() []Rule {
 			Confidence: 0.99,
 			Condition: func(b *signals.SignalBundle) bool {
 				destructive := map[string]bool{"rm": true, "mkfs": true, "dd": true, "fdisk": true, "shred": true}
+				// dd is always destructive when targeting real devices (dd if=/dev/sda)
+				// — fire even without extracted paths since dd has near-zero legitimate use on /dev/*
+				if b.Command.VerbDanger["dd"] > 0 {
+					return true
+				}
 				for _, v := range b.Command.Verbs {
 					if destructive[v] && b.Path.HasCritical {
 						return true
@@ -82,6 +87,21 @@ func Phase1Rules() []Rule {
 					}
 				}
 				return false
+			},
+		},
+		{
+			Name:       "critical_path_write",
+			Priority:   13,
+			Action:     ActionDeny,
+			Severity:   "critical",
+			Confidence: 0.95,
+			Condition: func(b *signals.SignalBundle) bool {
+				// Writing to critical system paths or sensitive files via any tool
+				cat := b.ToolClass.Category
+				if cat != "file_write" && cat != "file_delete" {
+					return false
+				}
+				return (b.Path.HasCritical || b.Path.HasSensitive) && !b.Path.AllInProject
 			},
 		},
 		{
