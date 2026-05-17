@@ -680,12 +680,19 @@ var scenarios = map[string][]demoStep{
 // phase3_cascade demonstrates Phase 3 LLM intent (requires API key):
 //   Commands that Phase 1 ESCALATEs and Phase 2 has no context for.
 //   LLM makes the final call (malicious→DENY, legitimate→ALLOW, suspicious→ESCALATE).
+// Phase 2 cascade:
+//   rm /var/log/*.log — verb danger 0.80, path not critical/sensitive, not in project
+//   → Phase 1: shell_no_rule_matched (ESCALATE, conf=0.60 < 0.85)
+//   → Phase 2: sees prior deny verb="rm" within 60s → retry_after_deny → DENY
 var phase2Steps = []demoStep{
 	{"git status (baseline)", "Shell", map[string]any{"command": "git status"}, 800},
 	{"npm install (baseline)", "Shell", map[string]any{"command": "npm install"}, 700},
-	{"rm -rf /etc ⚠ [Phase 1 → DENY, verb recorded]", "Shell", map[string]any{"command": "rm -rf /etc"}, 1200},
-	{"rm /tmp/build_cache ⚠ [Phase 1→ESCALATE, Phase 2→retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm /tmp/build_cache"}, 1000},
-	{"rm ./old_logs/*.log ⚠ [Phase 1→ESCALATE, Phase 2→retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm ./old_logs/*.log"}, 900},
+	// Step 3: Phase 1 DENY with high confidence → verb "rm" recorded in session
+	{"rm -rf /etc [P1→DENY, records verb=rm in session]", "Shell", map[string]any{"command": "rm -rf /etc"}, 1400},
+	// Step 4: Phase 1 ESCALATE (0.60) → Phase 2 sees verb "rm" was denied 1s ago → retry_after_deny → DENY
+	{"rm /var/log/app.log [P1→ESCALATE→P2 retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm /var/log/app.log"}, 1200},
+	// Step 5: Same pattern — Phase 2 still fires within 60s window
+	{"rm /var/run/myapp.pid [P1→ESCALATE→P2 retry_after_deny→DENY]", "Shell", map[string]any{"command": "rm /var/run/myapp.pid"}, 1000},
 }
 
 // Commands that Phase 1 ESCALATEs (confidence < 0.85) — genuinely ambiguous for LLM
