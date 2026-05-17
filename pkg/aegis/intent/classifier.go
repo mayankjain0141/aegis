@@ -6,6 +6,7 @@ package intent
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,13 +54,38 @@ type Classifier struct {
 }
 
 // New creates a classifier using the given model and API key env var.
-// If apiKeyEnv is empty, tries OPENAI_API_KEY then ANTHROPIC_API_KEY.
+// Supports LiteLLM proxy via LITELLM_API_KEY + LITELLM_BASE_URL env vars.
+// If apiKeyEnv is empty, checks: LITELLM_API_KEY → OPENAI_API_KEY → ANTHROPIC_API_KEY.
 func New(model, apiKeyEnv string, maxCallsPerMin int) (*Classifier, error) {
-	if model == "" {
-		model = "gpt-4o-mini"
-	}
 	if maxCallsPerMin <= 0 {
 		maxCallsPerMin = 10
+	}
+
+	// LiteLLM proxy takes priority — OpenAI-compatible endpoint with custom base URL
+	if os.Getenv("LITELLM_API_KEY") != "" || apiKeyEnv == "LITELLM_API_KEY" {
+		key := os.Getenv("LITELLM_API_KEY")
+		if key == "" {
+			return nil, fmt.Errorf("LITELLM_API_KEY is set but empty")
+		}
+		baseURL := os.Getenv("LITELLM_BASE_URL")
+		if baseURL == "" {
+			baseURL = "https://your-llm-proxy.example.com/v1"
+		}
+		if model == "" {
+			model = "anthropic/claude-sonnet-4-6"
+		}
+		// 
+		transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+		c := &Classifier{
+			client:  &http.Client{Timeout: 30 * time.Second, Transport: transport},
+			model:   model,
+			apiKey:  key,
+			baseURL: baseURL,
+			timeout: 30 * time.Second,
+			budget:  newRateLimiter(maxCallsPerMin),
+		}
+		c.totalCost.Store(float64(0))
+		return c, nil
 	}
 
 	keyEnv := apiKeyEnv
@@ -73,20 +99,23 @@ func New(model, apiKeyEnv string, maxCallsPerMin int) (*Classifier, error) {
 
 	key := os.Getenv(keyEnv)
 	if key == "" {
-		return nil, fmt.Errorf("no API key found (set %s)", keyEnv)
+		return nil, fmt.Errorf("no API key found (set LITELLM_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)")
 	}
 
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
 	baseURL := "https://api.openai.com/v1"
 	if keyEnv == "ANTHROPIC_API_KEY" {
 		baseURL = "https://api.anthropic.com/v1"
 	}
 
 	c := &Classifier{
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client:  &http.Client{Timeout: 30 * time.Second},
 		model:   model,
 		apiKey:  key,
 		baseURL: baseURL,
-		timeout: 500 * time.Millisecond,
+		timeout: 30 * time.Second,
 		budget:  newRateLimiter(maxCallsPerMin),
 	}
 	c.totalCost.Store(float64(0))

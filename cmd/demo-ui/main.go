@@ -846,11 +846,30 @@ func main() {
 }
 
 // tryBuildClassifier creates a real LLM classifier from env vars.
-// Checks OPENAI_API_KEY first, then ANTHROPIC_API_KEY.
+// Priority: LITELLM_API_KEY (proxy) → OPENAI_API_KEY → ANTHROPIC_API_KEY.
 func tryBuildClassifier(log *slog.Logger) (*intent.Classifier, error) {
+	// LiteLLM proxy (OpenAI-compatible)
+	if os.Getenv("LITELLM_API_KEY") != "" {
+		baseURL := os.Getenv("LITELLM_BASE_URL")
+		if baseURL == "" {
+			baseURL = "https://your-llm-proxy.example.com/v1"
+		}
+		model := os.Getenv("LITELLM_MODEL")
+		if model == "" {
+			model = "anthropic/claude-sonnet-4-6"
+		}
+		c, err := intent.New(model, "LITELLM_API_KEY", 20)
+		if err != nil {
+			log.Warn("LiteLLM classifier init failed", "error", err)
+		} else {
+			log.Info("Phase 3 LLM via LiteLLM proxy", "base_url", baseURL, "model", model)
+			return c, nil
+		}
+	}
+	// Direct provider keys
 	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
 		if os.Getenv(env) != "" {
-			c, err := intent.New("gpt-4o-mini", env, 20)
+			c, err := intent.New("", env, 20)
 			if err != nil {
 				log.Warn("classifier init failed", "env", env, "error", err)
 				continue
