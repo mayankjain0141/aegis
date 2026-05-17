@@ -68,10 +68,14 @@ type Engine struct {
 	allowlistMu  sync.RWMutex
 }
 
-// intentClassifier is an interface so we can wire in intent.Classifier without a hard dep.
-type intentClassifier interface {
+// IntentClassifier is the interface for Phase 3 LLM intent classification.
+// Satisfied by *intent.Classifier; also usable with test mocks.
+type IntentClassifier interface {
 	Classify(ctx context.Context, req *intent.ClassifyRequest) (*intent.IntentSignal, error)
 }
+
+// intentClassifier is the unexported alias used internally.
+type intentClassifier = IntentClassifier
 
 // Option configures the Engine.
 type Option func(*Engine)
@@ -365,7 +369,8 @@ func (e *Engine) EvaluateJSON(ctx context.Context, tool, argsJSON, cwd string) *
 }
 
 // WithIntentClassifier wires a Phase 3 LLM intent classifier into the engine.
-func WithIntentClassifier(c *intent.Classifier) Option {
+// Accepts any IntentClassifier implementation (including test mocks).
+func WithIntentClassifier(c IntentClassifier) Option {
 	return func(e *Engine) { e.intentClassifier = c }
 }
 
