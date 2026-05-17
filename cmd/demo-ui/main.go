@@ -845,12 +845,14 @@ func main() {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Error("listen failed — another instance may be running",
-			"addr", addr,
-			"hint", "Ctrl+C the other terminal, or set AEGIS_DEMO_PORT=7475",
-			"error", err,
-		)
-		os.Exit(1)
+		// Port in use — try to evict whatever is holding it, then retry
+		if evicted := evictPortHolder(port, log); evicted {
+			ln, err = net.Listen("tcp", addr)
+		}
+		if err != nil {
+			log.Error("could not bind port", "addr", addr, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	url := "http://" + addr
@@ -912,6 +914,35 @@ func main() {
 
 // tryBuildClassifier creates a real LLM classifier from env vars.
 // Priority: LITELLM_API_KEY (proxy) → OPENAI_API_KEY → ANTHROPIC_API_KEY.
+// evictPortHolder sends SIGTERM to whichever process holds the port,
+// waits up to 3s for the socket to be released, and returns true if it succeeded.
+func evictPortHolder(port string, log *slog.Logger) bool {
+	out, err := exec.Command("lsof", "-ti", "tcp:"+port).Output()
+	if err != nil || len(out) == 0 {
+		return false
+	}
+	pids := strings.Fields(strings.TrimSpace(string(out)))
+	for _, pidStr := range pids {
+		var pid int
+		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil || pid == 0 {
+			continue
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			log.Info("evicting previous instance", "pid", pid)
+			proc.Signal(syscall.SIGTERM) //nolint:errcheck
+		}
+	}
+	// Wait up to 3s for the socket to be freed
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if ln, err := net.Listen("tcp", "localhost:"+port); err == nil {
+			ln.Close()
+			return true
+		}
+	}
+	return false
+}
+
 func tryBuildClassifier(log *slog.Logger) (*intent.Classifier, error) {
 	// LiteLLM proxy (OpenAI-compatible)
 	if os.Getenv("LITELLM_API_KEY") != "" {
