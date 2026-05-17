@@ -183,7 +183,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 		b2 := signals.ComputeBehavioral(
 			bundle, primaryVerb, history,
 			sig.CallsLastMinute,
-			sig.LastDenyTimeAgo, "",
+			sig.LastDenyTimeAgo, sig.LastDenyVerb, // LastDenyVerb enables RetryAfterDeny
 			sig.BaselineDeviation,
 			sig.RiskTrend,
 		)
@@ -286,10 +286,21 @@ func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
 			argSummary = cs
 		}
 	}
+	primaryVerb := ""
+	if cmd, ok := req.Arguments["command"]; ok {
+		if cmdStr, ok := cmd.(string); ok && cmdStr != "" {
+			// Extract first word as a rough primary verb for retry detection
+			fields := strings.Fields(cmdStr)
+			if len(fields) > 0 {
+				primaryVerb = fields[0]
+			}
+		}
+	}
 	s.Record(session.ToolCall{
 		Time:           time.Now(), // must be set for window-based rate/deny detection
 		Tool:           req.Tool,
 		ArgSummary:     argSummary,
+		PrimaryVerb:    primaryVerb,
 		Decision:       string(d.Action),
 		Rule:           d.Rule,
 		CompositeScore: composite,

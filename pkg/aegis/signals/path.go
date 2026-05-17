@@ -272,16 +272,19 @@ func findProjectRoot(cwd string) string {
 	return root
 }
 
-func walkToGitRoot(dir string) string {
+func walkToGitRoot(start string) string {
+	dir := start
 	for {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			break
+			break // reached filesystem root without finding .git
 		}
 		dir = parent
 	}
-	return dir // return highest reachable dir as fallback
+	// No .git found: use the original CWD as the project root.
+	// Do NOT return "/" — that would make every absolute path appear in-project.
+	return start
 }

@@ -233,15 +233,15 @@ func extractRedirectTargets(cmd string) []string {
 // (e.g., curl -d @/etc/passwd or curl -F "file=@/etc/shadow").
 func HasDataFilePattern(args []string) (bool, string) {
 	for _, arg := range args {
-		// -d @/path
+		// -d @/path  (strip only the @ prefix, preserve the full path)
 		if strings.HasPrefix(arg, "@/") || strings.HasPrefix(arg, "@~") {
-			return true, strings.TrimPrefix(arg, "@")
+			return true, arg[1:] // keep leading / or ~
 		}
 		// -F "field=@/path" or --form "field=@/path"
 		if strings.Contains(arg, "=@/") || strings.Contains(arg, "=@~") {
 			idx := strings.Index(arg, "=@")
 			if idx >= 0 {
-				return true, strings.TrimPrefix(arg[idx+2:], "/")
+				return true, arg[idx+2:] // keep leading / or ~ — do NOT strip it
 			}
 		}
 	}

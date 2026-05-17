@@ -223,13 +223,16 @@ func (e *Extractor) unwrap(binary string, args []string) (string, []string) {
 	}
 	for e.cmdDB.IsWrapper(binary) && len(args) > 0 {
 		i := 0
-		// Skip flags and their values
+		// Skip flags and their values.
+		// --key=value style flags are self-contained; -k value style flags consume next token.
+		// We must NOT skip the next token after --key=value since it is the actual command.
 		for i < len(args) {
 			if strings.HasPrefix(args[i], "-") {
-				i++ // skip the flag
-				// Some flags take a value argument
-				if i < len(args) && !strings.HasPrefix(args[i], "-") {
-					i++ // skip the value
+				isSelfContained := strings.Contains(args[i], "=") // --key=value form
+				i++                                               // skip the flag itself
+				// Only consume the next token as a value for -k value (short/long without =)
+				if !isSelfContained && i < len(args) && !strings.HasPrefix(args[i], "-") {
+					i++ // skip the value token
 				}
 			} else if binary == "timeout" || binary == "nice" || binary == "ionice" {
 				// These wrappers take a positional numeric arg before the command

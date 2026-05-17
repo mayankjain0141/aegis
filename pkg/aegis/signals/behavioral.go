@@ -145,12 +145,6 @@ func matchSequences(current *SignalBundle, history []SessionHistoryEntry) (float
 	// encoded_exfil: sensitive read → base64 → network
 	if current.Network.HasDataFlag {
 		cutoff := time.Now().Add(-60 * time.Second)
-		var steps []string
-		for _, h := range history {
-			if h.Time.After(cutoff) {
-				steps = append(steps, h.ArgSummary)
-			}
-		}
 		hasSensitiveRead := false
 		hasBase64 := false
 		for _, h := range history {
@@ -166,7 +160,6 @@ func matchSequences(current *SignalBundle, history []SessionHistoryEntry) (float
 		if hasSensitiveRead && hasBase64 {
 			return 0.85, "encoded_exfil"
 		}
-		_ = steps
 	}
 
 	return 0.0, ""

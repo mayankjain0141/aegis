@@ -12,6 +12,7 @@ type ToolCall struct {
 	Time           time.Time
 	Tool           string
 	ArgSummary     string  // first 80 chars of the command/path
+	PrimaryVerb    string  // primary dangerous verb (for RetryAfterDeny detection)
 	Decision       string  // "allow", "deny", "escalate"
 	Rule           string  // which rule fired
 	CompositeScore float64
@@ -64,7 +65,7 @@ func (s *State) Record(call ToolCall) {
 	}
 
 	if call.Decision == "deny" || call.Decision == "escalate" {
-		ev := DenyEvent{Time: call.Time, Tool: call.Tool, Rule: call.Rule}
+		ev := DenyEvent{Time: call.Time, Tool: call.Tool, Verb: call.PrimaryVerb, Rule: call.Rule}
 		s.denies[s.denyHead] = ev
 		s.denyHead = (s.denyHead + 1) % len(s.denies)
 		if s.denyCount < len(s.denies) {
@@ -104,11 +105,12 @@ func (s *State) Signal(current ToolCall) SessionSignal {
 	// Count unique tools
 	sig.UniqueToolsUsed = len(s.toolCounts)
 
-	// Recent deny count and last deny info
+	// Recent deny count and last deny info (including verb for RetryAfterDeny detection)
 	sig.RecentDenyCount = s.countDeniesInWindow(now, 5*time.Minute)
 	if s.denyCount > 0 {
 		lastDeny := s.denies[(s.denyHead-1+len(s.denies))%len(s.denies)]
 		sig.LastDenyTool = lastDeny.Tool
+		sig.LastDenyVerb = lastDeny.Verb
 		sig.LastDenyTimeAgo = now.Sub(lastDeny.Time)
 		sig.LastDenyRule = lastDeny.Rule
 	}
@@ -283,6 +285,7 @@ type SessionSignal struct {
 	UniqueToolsUsed     int
 	RecentDenyCount     int
 	LastDenyTool        string
+	LastDenyVerb        string // primary verb from the denied call, for RetryAfterDeny
 	LastDenyTimeAgo     time.Duration
 	LastDenyRule        string
 	ToolSequence        []string

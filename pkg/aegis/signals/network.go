@@ -247,18 +247,30 @@ func computeNetworkScore(sig *NetworkSignal) float64 {
 		}
 	}
 
-	// Determine worst-case host classification
+	// Classify the worst-case host in the set.
+	// A host is trusted if it is KnownSafe OR Internal; unknown only if neither.
 	hasUnknown := false
-	allSafe := true
-	allInternal := true
+	hasTrusted := false
+	allTrusted := true
 	for _, h := range sig.Hosts {
-		if h.IsKnownSafe {
-			allInternal = false
-		} else if h.IsInternal {
-			allSafe = false
+		trusted := h.IsKnownSafe || h.IsInternal
+		if trusted {
+			hasTrusted = true
 		} else {
 			hasUnknown = true
+			allTrusted = false
+		}
+	}
+	_ = hasTrusted
+
+	// For scoring purposes, further distinguish KnownSafe vs Internal among trusted hosts.
+	allSafe := true     // all hosts are KnownSafe (public registries, etc.)
+	allInternal := true // all hosts are Internal (LAN, localhost)
+	for _, h := range sig.Hosts {
+		if !h.IsKnownSafe {
 			allSafe = false
+		}
+		if !h.IsInternal {
 			allInternal = false
 		}
 	}
@@ -273,6 +285,9 @@ func computeNetworkScore(sig *NetworkSignal) float64 {
 		if allInternal {
 			return 0.10
 		}
+		if allTrusted {
+			return 0.10 // mixed safe+internal is still trusted
+		}
 		return 0.30
 	}
 
@@ -286,11 +301,12 @@ func computeNetworkScore(sig *NetworkSignal) float64 {
 	if hasUnknown {
 		return 0.60
 	}
+	// All trusted (safe or internal)
 	if allInternal {
 		return 0.25
 	}
 	if allSafe {
 		return 0.20
 	}
-	return 0.45
+	return 0.25 // mixed trusted — treat as internal-level risk
 }
