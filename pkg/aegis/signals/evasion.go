@@ -16,9 +16,11 @@ type EvasionSignal struct {
 }
 
 var (
-	// base64ToShellPattern detects base64/hex decoded and piped to shell
+	// base64ToShellPattern detects base64/hex decoded and piped to shell.
+	// [^|]* allows flags like -d/--decode between the tool and its pipe segment.
+	// Does NOT cross pipe boundaries to avoid false positives like grep base64 ... | bash.
 	base64ToShellPattern = regexp.MustCompile(
-		`(?i)(base64|xxd|od|hexdump|perl\s+-e|python.*decode|echo.*\\\|)\s*[\|>].*\b(bash|sh|zsh|dash|exec)\b`,
+		`(?i)(base64|xxd|od|hexdump|perl\s+-e|python.*decode)[^|]*\|[^|]*\b(bash|sh|zsh|dash|exec)\b`,
 	)
 
 	// curlPipeShell detects download and execute patterns

@@ -228,7 +228,13 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 			}
 			sig, err := e.intentClassifier.Classify(ctx, creq)
 			if err != nil {
-				d3 := &Decision{Action: ActionDeny, Rule: "llm_timeout", Confidence: 0.60, CompositeScore: composite, Phase: 3}
+				rule := "llm_error"
+				if err.Error() == "model_refusal" {
+					// Safety model refused — command is too obviously dangerous to classify.
+					// Treat as deny but distinguish from network/timeout failures.
+					rule = "llm_refusal"
+				}
+				d3 := &Decision{Action: ActionDeny, Rule: rule, Confidence: 0.60, CompositeScore: composite, Phase: 3}
 				e.recordCall(req, d3, composite)
 				return d3
 			}

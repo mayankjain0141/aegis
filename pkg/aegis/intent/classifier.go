@@ -191,7 +191,8 @@ func buildPrompt(req *ClassifyRequest) string {
 
 type openAIResponse struct {
 	Choices []struct {
-		Message struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
@@ -233,7 +234,11 @@ func (c *Classifier) callLLM(ctx context.Context, prompt string) (string, string
 	if len(oai.Choices) == 0 {
 		return "", "", fmt.Errorf("no choices in response")
 	}
-	return oai.Choices[0].Message.Content, oai.Model, nil
+	choice := oai.Choices[0]
+	if choice.FinishReason == "refusal" || choice.Message.Content == "" {
+		return "", "", fmt.Errorf("model_refusal")
+	}
+	return choice.Message.Content, oai.Model, nil
 }
 
 type llmOutput struct {

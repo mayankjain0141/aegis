@@ -201,8 +201,8 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		s.clientsMu.Unlock()
 	}()
 
-	// Replay last 50 events for new connections
-	for _, ev := range s.ring.Recent(50) {
+	// Replay last 20 events for new connections
+	for _, ev := range s.ring.Recent(20) {
 		if ev == nil {
 			continue
 		}
@@ -826,6 +826,7 @@ func main() {
 	mux.HandleFunc("/api/events", srv.handleEvents)
 	mux.HandleFunc("/api/stats", srv.handleStats)
 	mux.HandleFunc("/api/demo", srv.handleDemoControl)
+	mux.HandleFunc("/api/playground", srv.handlePlayground)
 	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"llm_enabled": srv.llmEnabled}) //nolint:errcheck
@@ -877,10 +878,10 @@ func main() {
 		openBrowser(url)
 	}()
 
-	// Auto-start demo scenario
+	// Auto-populate ring with one pass so Live Feed isn't empty on open
 	go func() {
-		time.Sleep(2 * time.Second)
-		srv.runScenario("full_demo")
+		time.Sleep(3 * time.Second)
+		srv.runScenario("attack_sequence")
 	}()
 
 	// Serve in background

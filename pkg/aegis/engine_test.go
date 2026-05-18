@@ -357,8 +357,8 @@ func TestPhase3_FailSecure_OnLLMError(t *testing.T) {
 	if d.Action != aegis.ActionDeny {
 		t.Errorf("action: want deny on LLM error (fail-secure), got %v", d.Action)
 	}
-	if d.Rule != "llm_timeout" {
-		t.Errorf("rule: want llm_timeout, got %q", d.Rule)
+	if d.Rule != "llm_error" {
+		t.Errorf("rule: want llm_error, got %q", d.Rule)
 	}
 	if d.Phase != 3 {
 		t.Errorf("phase: want 3 for LLM error, got %d", d.Phase)
