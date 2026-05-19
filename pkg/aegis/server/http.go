@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/mayjain/aegis/pkg/aegis"
 )
+
+const daemonAPIVersion = "1"
 
 const DefaultSocketPath = "/tmp/aegis-engine.sock"
 
@@ -86,6 +89,11 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	clientVersion := r.Header.Get("X-Aegis-Version")
+	if clientVersion != "" && clientVersion != daemonAPIVersion {
+		log.Printf("aegis: daemon/client version mismatch: server=%s client=%s", daemonAPIVersion, clientVersion)
 	}
 
 	var req evaluateRequest

@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// RotateConfig controls WAL file rotation.
+type RotateConfig struct {
+	MaxSizeMB int // rotate when file exceeds this size; 0 = no limit
+	MaxFiles  int // keep at most this many rotated files; 0 = no limit
+}
+
 // Event is a single decision record in the audit WAL.
 type Event struct {
 	Time           time.Time `json:"time"`
@@ -29,13 +35,19 @@ type Event struct {
 // WAL is a thread-safe append-only JSONL writer.
 type WAL struct {
 	path string
+	cfg  RotateConfig
 	f    *os.File
 	enc  *json.Encoder
 	mu   sync.Mutex
 }
 
-// Open opens or creates the WAL file at path.
+// Open opens or creates the WAL file at path with no rotation.
 func Open(path string) (*WAL, error) {
+	return OpenWithRotation(path, RotateConfig{})
+}
+
+// OpenWithRotation opens or creates the WAL file at path with the given rotation config.
+func OpenWithRotation(path string, cfg RotateConfig) (*WAL, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
 	}
@@ -43,13 +55,49 @@ func Open(path string) (*WAL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open WAL %s: %w", path, err)
 	}
-	return &WAL{path: path, f: f, enc: json.NewEncoder(f)}, nil
+	return &WAL{path: path, cfg: cfg, f: f, enc: json.NewEncoder(f)}, nil
+}
+
+// maybeRotate rotates the log file if it exceeds MaxSizeMB. Must be called with mu held.
+func (w *WAL) maybeRotate() {
+	if w.cfg.MaxSizeMB <= 0 {
+		return
+	}
+	info, err := w.f.Stat()
+	if err != nil || info.Size() < int64(w.cfg.MaxSizeMB)*1024*1024 {
+		return
+	}
+
+	w.f.Close() //nolint:errcheck
+
+	// Shift rotated files: audit.log.N-1 → audit.log.N
+	maxFiles := w.cfg.MaxFiles
+	if maxFiles <= 0 {
+		maxFiles = 9 // default cap to avoid unbounded growth
+	}
+	for i := maxFiles - 1; i >= 1; i-- {
+		older := fmt.Sprintf("%s.%d", w.path, i)
+		newer := fmt.Sprintf("%s.%d", w.path, i-1)
+		if i == 1 {
+			newer = w.path
+		}
+		os.Rename(newer, older) //nolint:errcheck
+	}
+
+	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		// If we can't reopen, leave enc pointing at the closed file; writes will error.
+		return
+	}
+	w.f = f
+	w.enc = json.NewEncoder(f)
 }
 
 // Write appends an event. Thread-safe.
 func (w *WAL) Write(ev Event) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.maybeRotate()
 	return w.enc.Encode(ev)
 }
 

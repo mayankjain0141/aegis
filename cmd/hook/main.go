@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mayjain/aegis/pkg/aegis"
@@ -27,6 +28,7 @@ import (
 
 const daemonSocketPath = "/tmp/aegis-daemon.sock"
 const daemonTimeout = 200 * time.Millisecond
+const daemonAPIVersion = "1"
 
 // hookResponse is the JSON written to stdout for Cursor.
 type hookResponse struct {
@@ -56,8 +58,11 @@ var ruleDescriptions = map[string]string{
 	"suid_manipulation":         "Command attempts to set the SUID bit",
 	"cron_persistence":          "Command installs a cron job for persistence",
 	"bashrc_persistence":        "Command modifies shell profile with exec/network content",
-	"evasion_with_danger":       "Command uses evasion techniques with dangerous operations",
-	"unknown_network_write":     "Command writes data to an unknown external host",
+	"evasion_with_danger":       "Command uses encoding/obfuscation with dangerous operations",
+	"default_uncertain_shell":   "Shell command could not be confidently classified",
+	"unknown_network_write":     "Command writes data to an unknown or untrusted external host",
+	"default_uncertain":         "Tool call could not be confidently classified by any rule",
+	"shell_no_rule_matched":     "Shell command with elevated danger score matched no specific rule",
 }
 
 // daemonRequest is the JSON body sent to the daemon's /evaluate endpoint.
@@ -79,23 +84,29 @@ type daemonResponse struct {
 	Stage          string   `json:"stage"`
 }
 
-var wal *telemetry.WAL // opened once per process, nil if unavailable
+var (
+	wal     *telemetry.WAL
+	walOnce sync.Once
+)
 
-func init() {
-	// Try to open the WAL for audit logging. Non-fatal if unavailable.
-	logPath := defaultLogPath()
-	if logPath != "" {
+func getWAL() *telemetry.WAL {
+	walOnce.Do(func() {
+		logPath := defaultLogPath()
+		if logPath == "" {
+			return
+		}
 		w, err := telemetry.Open(logPath)
 		if err == nil {
 			wal = w
 		}
-	}
+	})
+	return wal
 }
 
 // closeWAL flushes and closes the WAL. Called via defer in main.
 func closeWAL() {
-	if wal != nil {
-		wal.Close() //nolint:errcheck
+	if w := getWAL(); w != nil {
+		w.Close() //nolint:errcheck
 	}
 }
 
@@ -187,7 +198,13 @@ func tryDaemon(req *normalizedRequest) *aegis.Decision {
 		},
 	}
 
-	resp, err := client.Post("http://daemon/evaluate", "application/json", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(context.Background(), "POST", "http://daemon/evaluate", bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Aegis-Version", daemonAPIVersion)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil // daemon not running
 	}
@@ -234,7 +251,8 @@ func agentID(req *normalizedRequest) string {
 }
 
 func writeWAL(req *normalizedRequest, d *aegis.Decision, latencyUs int64) {
-	if wal == nil {
+	w := getWAL()
+	if w == nil {
 		return
 	}
 	argSummary := req.Tool
@@ -246,7 +264,7 @@ func writeWAL(req *normalizedRequest, d *aegis.Decision, latencyUs int64) {
 			}
 		}
 	}
-	wal.Write(telemetry.Event{ //nolint:errcheck
+	w.Write(telemetry.Event{ //nolint:errcheck
 		Time:           time.Now(),
 		Tool:           req.Tool,
 		ArgSummary:     argSummary,
@@ -313,9 +331,18 @@ func writeDeny(d *aegis.Decision) {
 		desc = "Security policy violation"
 	}
 
+	evidenceLines := ""
+	if len(d.Evidence) > 0 {
+		evidenceLines = "\n\nEvidence:\n"
+		for _, e := range d.Evidence {
+			evidenceLines += "  - " + e + "\n"
+		}
+		evidenceLines = strings.TrimRight(evidenceLines, "\n")
+	}
+
 	userMsg := fmt.Sprintf(
-		"Blocked by Aegis [rule: %s]\n%s\n\nTo override: add to .aegis/allowlist.yaml or run with AEGIS_MODE=audit\nTo disable temporarily: export AEGIS_MODE=off",
-		d.Rule, desc,
+		"Blocked by Aegis [rule: %s]\n%s%s\n\nTo override: add to .aegis/allowlist.yaml or run with AEGIS_MODE=audit\nTo disable temporarily: export AEGIS_MODE=off",
+		d.Rule, desc, evidenceLines,
 	)
 	agentMsg := fmt.Sprintf(
 		"Request blocked by Aegis security policy. Rule: %s. Severity: %s. Action: %s.",
