@@ -10,12 +10,9 @@ rules:
       attack that warrants human review before execution.
     tags: [evasion, danger, escalate]
     condition:
-      evasion:
-        score:
-          gt: 0.3
-      verb_danger:
-        "*":
-          gt: 0.7
+      and:
+        - expr: "evasion_score > 0.3"
+        - expr: "max_verb_danger > 0.7"
 
   - name: unknown_network_write
     priority: 91
@@ -23,15 +20,13 @@ rules:
     severity: medium
     confidence: 0.70
     description: >
-      Escalates commands where network score > 0.5 and all detected hosts are unknown
-      (not marked safe or internal). Commands communicating with unrecognized external
-      endpoints warrant human review.
+      Escalates commands where network score > 0.5. Commands communicating with
+      unrecognized external endpoints warrant human review.
+      Note: the Go rule also checks !IsKnownSafe && !IsInternal per host, but
+      per-host safety is not exposed in ExprEnv; network_score > 0.5 is used as a proxy.
     tags: [network, escalate, unknown-host]
     condition:
-      expr: >
-        b.Network.Score > 0.5 &&
-        len(b.Network.Hosts) > 0 &&
-        allHostsUnknown(b)
+      expr: "network_score > 0.5"
 
   - name: shell_no_rule_matched
     priority: 92
@@ -44,10 +39,9 @@ rules:
       shell activity.
     tags: [shell, escalate, catch-all]
     condition:
-      tool_category: shell
-      verb_danger:
-        "*":
-          gt: 0.30
+      and:
+        - tool_category: shell
+        - expr: "max_verb_danger > 0.30"
 
   - name: default_uncertain_shell
     priority: 99
@@ -72,4 +66,4 @@ rules:
       are considered safe by default.
     tags: [non-shell, default, allow]
     condition:
-      expr: b.ToolClass.Category != "shell"
+      expr: "tool_category != \"shell\""
