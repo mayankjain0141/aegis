@@ -227,6 +227,40 @@ func TestCompositeScore_Capped(t *testing.T) {
 	}
 }
 
+// ── Sequence ordering (TEST 2.1, TEST 2.2) ───────────────────────────────
+
+func TestSequence_RejectsReverseOrder(t *testing.T) {
+	// TEST 2.1: NetworkWrite in history AFTER sensitive read must NOT match.
+	// History: [sensitiveRead, networkWrite] — a prior exfil already happened;
+	// the current network write is not the first one after the read.
+	now := time.Now()
+	history := []SessionHistoryEntry{
+		{Time: now.Add(-25 * time.Second), PathSensitive: true, NetworkWrite: false},
+		{Time: now.Add(-15 * time.Second), NetworkWrite: true}, // intervening write
+	}
+	bundle := bundleWithNetwork(0, true) // current is a network write
+	risk, _ := matchSequences(bundle, history, now)
+	if risk >= 0.9 {
+		t.Errorf("exfil_after_sensitive_read should not match when NetworkWrite already occurred after the read, got risk=%.2f", risk)
+	}
+}
+
+func TestSequence_UnrelatedOpsInWindowDontMatch(t *testing.T) {
+	// TEST 2.2: base64 BEFORE sensitive read must NOT match encoded_exfil.
+	// Old code matched hasSensitiveRead && hasBase64 anywhere in window → FP.
+	// Fixed code requires strict ordering: sensitiveRead → base64 → network.
+	now := time.Now()
+	history := []SessionHistoryEntry{
+		{Time: now.Add(-55 * time.Second), ArgSummary: "base64 encode config"}, // base64 FIRST
+		{Time: now.Add(-45 * time.Second), PathSensitive: true},                // sensitive read AFTER
+	}
+	bundle := bundleWithNetwork(0, true) // current is a network write
+	_, name := matchSequences(bundle, history, now)
+	if name == "encoded_exfil" {
+		t.Errorf("encoded_exfil should not match when base64 preceded the sensitive read (wrong order)")
+	}
+}
+
 // ── BaselineEstablished propagation ──────────────────────────────────────
 
 func TestBaselineEstablished_FieldSettable(t *testing.T) {
