@@ -5,10 +5,38 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
 
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
+
+// safeOPACapabilities returns OPA capabilities with I/O builtins removed.
+// Rego policies in Aegis must not be able to make network calls, read files,
+// or exec processes — they can only inspect the signal bundle passed as input.
+var safeOPACapabilities = func() *ast.Capabilities {
+	caps := ast.CapabilitiesForThisVersion()
+	blocked := map[string]bool{
+		"http.send":      true,
+		"opa.runtime":    true,
+		"net.lookup_ip_addr": true,
+		"net.cidr_contains_matches": true,
+		"io.jwt.decode":  true,
+		"io.jwt.encode_sign": true,
+		"io.jwt.verify_es256": true,
+		"io.jwt.verify_hs256": true,
+		"io.jwt.verify_ps256": true,
+		"io.jwt.verify_rs256": true,
+	}
+	filtered := make([]*ast.Builtin, 0, len(caps.Builtins))
+	for _, b := range caps.Builtins {
+		if !blocked[b.Name] {
+			filtered = append(filtered, b)
+		}
+	}
+	caps.Builtins = filtered
+	return caps
+}()
 
 // OPAInput is the document passed to Rego policies as `input`.
 // Flattened from SignalBundle for ergonomic policy authoring.
@@ -52,9 +80,12 @@ func bundleToOPAInput(b *signals.SignalBundle) OPAInput {
 // Performance note: OPA evaluation is ~1-5ms; suitable for Tier 3 custom policies only.
 func CompileRego(regoSource, ruleQuery string) (Predicate, error) {
 	// Pre-compile to catch syntax/parse errors at load time.
+	// safeOPACapabilities strips http.send and other I/O builtins so Rego policies
+	// cannot exfiltrate tool call data to external endpoints.
 	_, err := rego.New(
 		rego.Query(ruleQuery),
 		rego.Module("policy.rego", regoSource),
+		rego.Capabilities(safeOPACapabilities),
 		rego.Input(map[string]interface{}{}),
 	).PrepareForEval(context.Background())
 	if err != nil {
@@ -76,6 +107,7 @@ func CompileRego(regoSource, ruleQuery string) (Predicate, error) {
 		r := rego.New(
 			rego.Query(ruleQuery),
 			rego.Module("policy.rego", regoSource),
+			rego.Capabilities(safeOPACapabilities),
 			rego.Input(inputMap),
 		)
 		rs, err := r.Eval(context.Background())

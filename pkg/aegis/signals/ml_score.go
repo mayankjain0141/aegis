@@ -147,10 +147,21 @@ func (s *MLScorer) encode(cmd string) []float64 {
 }
 
 // predictTree traverses a single XGBoost decision tree.
+// Returns 0 on any out-of-bounds condition to prevent panic → fail-open.
 func predictTree(tree *xgbTree, features []float64) float64 {
+	n := len(tree.LeftChildren)
 	node := 0
-	for tree.LeftChildren[node] != -1 { // not a leaf
+	for i := 0; i <= n; i++ { // loop bound prevents infinite cycle
+		if node < 0 || node >= n {
+			return 0 // malformed model — safe zero leaf
+		}
+		if tree.LeftChildren[node] == -1 {
+			break // leaf node
+		}
 		fidx := tree.SplitIndices[node]
+		if fidx < 0 || fidx >= len(features) {
+			return 0 // feature index out of range
+		}
 		val := features[fidx]
 		var goLeft bool
 		if math.IsNaN(val) {
@@ -163,6 +174,9 @@ func predictTree(tree *xgbTree, features []float64) float64 {
 		} else {
 			node = tree.RightChildren[node]
 		}
+	}
+	if node < 0 || node >= len(tree.SplitConditions) {
+		return 0
 	}
 	return tree.SplitConditions[node] // leaf value
 }

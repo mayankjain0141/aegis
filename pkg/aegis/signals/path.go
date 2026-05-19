@@ -226,9 +226,22 @@ func isCriticalPrefix(p string) bool {
 }
 
 func isInProject(normalized, raw, cwd, projectRoot string) bool {
-	// Relative paths are considered in-project
+	// Relative paths: resolve against cwd to detect path traversal escapes.
+	// "../../etc/passwd" from cwd=/home/user resolves outside the project.
 	if !filepath.IsAbs(raw) && !strings.HasPrefix(raw, "~/") {
-		return true
+		if cwd == "" {
+			return true // no cwd context — assume in-project
+		}
+		resolved := filepath.Clean(filepath.Join(cwd, raw))
+		root := projectRoot
+		if root == "" {
+			root = cwd
+		}
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil {
+			return false
+		}
+		return !strings.HasPrefix(rel, "..")
 	}
 
 	if projectRoot == "" {
