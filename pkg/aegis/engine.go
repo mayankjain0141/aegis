@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mayjain/aegis/internal/extract"
@@ -65,22 +64,6 @@ type Decision struct {
 	Stage          EvaluationStage `json:"stage"`
 }
 
-// Engine is the V2 risk evaluation engine.
-type Engine struct {
-	rules            []rules.Rule
-	bloom            *bloom.Filter
-	extractor        *extract.Extractor // fast (AST-only) for static rules
-	fullExtractor    *extract.Extractor // full (with dry-run) for behavioral analysis
-	sessions         map[string]*session.State
-	sessionMu        sync.Mutex
-	intentClassifier intentClassifier
-	// allowlists caches per-CWD allowlist configs loaded lazily from disk.
-	// Guarded by allowlistMu. If a fixed allowlist was provided via WithAllowlist,
-	// it is stored under the empty-string key and used for all requests.
-	allowlists   map[string]*allowlist.Config
-	allowlistMu  sync.RWMutex
-}
-
 // IntentClassifier is the interface for Phase 3 LLM intent classification.
 // Satisfied by *intent.Classifier; also usable with test mocks.
 type IntentClassifier interface {
@@ -90,6 +73,18 @@ type IntentClassifier interface {
 // intentClassifier is the unexported alias used internally.
 type intentClassifier = IntentClassifier
 
+// Engine is the V2 risk evaluation engine.
+type Engine struct {
+	fastPath  FastPath
+	evaluator RuleEvaluator
+	sigComp   SignalComputer
+	sessions  SessionStore
+	phase3    IntentClassifier
+	recorder  DecisionRecorder
+	// bloom is kept for loadBenignCorpus access (WithBenignCorpus option).
+	bloom *bloom.Filter
+}
+
 // Option configures the Engine.
 type Option func(*Engine)
 
@@ -97,7 +92,6 @@ type Option func(*Engine)
 func WithBenignCorpus(path string) Option {
 	return func(e *Engine) {
 		if err := e.loadBenignCorpus(path); err != nil {
-			// Non-fatal: bloom filter just won't have fast-path hits
 			fmt.Fprintf(os.Stderr, "aegis: bloom filter load warning: %v\n", err)
 		}
 	}
@@ -106,33 +100,56 @@ func WithBenignCorpus(path string) Option {
 // WithRules replaces the default rule set.
 func WithRules(r []rules.Rule) Option {
 	return func(e *Engine) {
-		e.rules = r
+		e.evaluator = newStaticRuleEvaluator(r)
+	}
+}
+
+// WithIntentClassifier wires a Phase 3 LLM intent classifier into the engine.
+func WithIntentClassifier(c IntentClassifier) Option {
+	return func(e *Engine) { e.phase3 = c }
+}
+
+// WithAllowlist sets a fixed allowlist used for all requests regardless of CWD.
+func WithAllowlist(cfg *allowlist.Config) Option {
+	return func(e *Engine) {
+		e.fastPath.setAllowlist("", cfg)
+	}
+}
+
+// WithAllowlistFromCWD pre-loads an allowlist for a specific project directory.
+func WithAllowlistFromCWD(cwd string) Option {
+	return func(e *Engine) {
+		e.fastPath.loadCWD(cwd)
 	}
 }
 
 // NewEngine creates an Engine with Phase 1 static rules.
-// If no corpus path is provided via options, it tries to load from the default location.
 func NewEngine(opts ...Option) (*Engine, error) {
 	db, err := loadCommandDB()
 	if err != nil {
-		// Non-fatal: extractor works without DB (reduced accuracy)
 		db = nil
 	}
 
+	bl := bloom.New(1000, 0.01)
+	fp := newDefaultFastPath(bl, nil)
+	store := newInMemorySessionStore()
+	fast := extract.NewFastExtractor(db)
+	full := extract.NewExtractor(db)
+	sigComp := newDefaultSignalComputer(fast, full, fp)
+
 	e := &Engine{
-		rules:         rules.Phase1Rules(),
-		bloom:         bloom.New(1000, 0.01),
-		extractor:     extract.NewFastExtractor(db), // AST-only for Phase 1 speed
-		fullExtractor: extract.NewExtractor(db),     // full dry-run for Phase 2
-		sessions:      make(map[string]*session.State),
-		allowlists:    make(map[string]*allowlist.Config),
+		fastPath:  fp,
+		evaluator: newStaticRuleEvaluator(rules.Phase1Rules()),
+		sigComp:   sigComp,
+		sessions:  store,
+		recorder:  newSessionRecorder(store),
+		bloom:     bl,
 	}
 
 	for _, opt := range opts {
 		opt(e)
 	}
 
-	// Try default corpus locations for bloom filter
 	if e.bloom.Len() == 0 {
 		for _, candidate := range defaultCorpusPaths() {
 			if _, err := os.Stat(candidate); err == nil {
@@ -149,26 +166,18 @@ func NewEngine(opts ...Option) (*Engine, error) {
 func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	argsJSON := marshalArgs(req.Arguments)
 
-	// Fast path: bloom filter exact match
-	key := bloom.CanonicalKey(req.Tool, req.Arguments)
-	if e.bloom.Contains(key) {
-		d := &Decision{Action: ActionAllow, Rule: "fast_path_allow", Confidence: 1.00, Stage: StageFastPath}
-		e.recordCall(req, d, 0.0)
-		return d
-	}
-
-	// Allowlist fast path: check project/user allowlist before rule evaluation
-	if allow, rule := e.checkAllowlist(req, argsJSON); allow {
+	// Fast path: bloom filter + allowlist short-circuit
+	if allow, rule := e.fastPath.Check(req, argsJSON); allow {
 		d := &Decision{Action: ActionAllow, Rule: rule, Confidence: 1.00, Stage: StageFastPath}
-		e.recordCall(req, d, 0.0)
+		e.recorder.Record(req, d, 0.0, nil)
 		return d
 	}
 
 	// Static rule engine
-	bundle := e.computeSignals(req.Tool, argsJSON, req.CWD)
+	bundle := e.sigComp.Compute(req.Tool, argsJSON, req.CWD)
 	composite := signals.CompositeScore(bundle)
 
-	rule, matched := rules.Evaluate(e.rules, bundle)
+	rule, matched := e.evaluator.Evaluate(bundle)
 	var staticDecision *Decision
 	if !matched {
 		staticDecision = &Decision{Action: ActionDeny, Rule: "no_rule_matched", Severity: "medium", Confidence: 0.50, CompositeScore: composite, Stage: StageStaticRules}
@@ -178,17 +187,16 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 
 	// High-confidence static rule decisions are final
 	if staticDecision.Confidence >= 0.85 {
-		e.recordCall(req, staticDecision, composite)
+		e.recorder.Record(req, staticDecision, composite, bundle)
 		return staticDecision
 	}
 
 	// Behavioral analysis for low-confidence decisions
 	var behavioralDecision *Decision
 	var behavioralMatched bool
-	sess := e.getOrCreateSession(req.AgentID)
+	sess := e.sessions.GetOrCreate(req.AgentID)
 	if sess != nil {
-		// Recompute with full extractor for better signal quality
-		bundle = e.computeSignalsFull(req.Tool, argsJSON, req.CWD)
+		bundle = e.sigComp.ComputeFull(req.Tool, argsJSON, req.CWD)
 		composite = signals.CompositeScore(bundle)
 
 		sessionSig := sess.Signal(session.ToolCall{Time: time.Now(), Tool: req.Tool})
@@ -200,7 +208,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 		behavioralSig := signals.ComputeBehavioral(
 			bundle, primaryVerb, history,
 			sessionSig.CallsLastMinute,
-			sessionSig.LastDenyTimeAgo, sessionSig.LastDenyVerb, // LastDenyVerb enables RetryAfterDeny
+			sessionSig.LastDenyTimeAgo, sessionSig.LastDenyVerb,
 			sessionSig.BaselineDeviation,
 			sessionSig.RiskTrend,
 			time.Now(),
@@ -221,7 +229,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	}
 
 	// LLM intent classifier for persistent uncertainty (ESCALATE decisions)
-	if e.intentClassifier != nil {
+	if e.phase3 != nil {
 		finalAction := staticDecision.Action
 		if behavioralMatched {
 			finalAction = behavioralDecision.Action
@@ -240,29 +248,27 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 					})
 				}
 			}
-			intentSig, err := e.intentClassifier.Classify(ctx, creq)
+			intentSig, err := e.phase3.Classify(ctx, creq)
 			if err != nil {
 				rule := "llm_error"
 				if err.Error() == "model_refusal" {
-					// Safety model refused — command is too obviously dangerous to classify.
-					// Treat as deny but distinguish from network/timeout failures.
 					rule = "llm_refusal"
 				}
 				d3 := &Decision{Action: ActionDeny, Rule: rule, Confidence: 0.60, CompositeScore: composite, Stage: StageIntentLLM}
-				e.recordCall(req, d3, composite)
+				e.recorder.Record(req, d3, composite, bundle)
 				return d3
 			}
 			d3 := classifyIntent(intentSig, composite)
-			e.recordCallWithBundle(req, d3, composite, bundle)
+			e.recorder.Record(req, d3, composite, bundle)
 			return d3
 		}
 	}
 
 	if behavioralMatched {
-		e.recordCallWithBundle(req, behavioralDecision, composite, bundle)
+		e.recorder.Record(req, behavioralDecision, composite, bundle)
 		return behavioralDecision
 	}
-	e.recordCallWithBundle(req, staticDecision, composite, bundle)
+	e.recorder.Record(req, staticDecision, composite, bundle)
 	return staticDecision
 }
 
@@ -279,93 +285,6 @@ func classifyIntent(intentSig *intent.IntentSignal, composite float64) *Decision
 	}
 }
 
-func (e *Engine) getOrCreateSession(agentID string) *session.State {
-	if agentID == "" {
-		return nil
-	}
-	e.sessionMu.Lock()
-	defer e.sessionMu.Unlock()
-	s, ok := e.sessions[agentID]
-	if !ok {
-		s = session.New(agentID)
-		e.sessions[agentID] = s
-	}
-	return s
-}
-
-// recordCallWithBundle records a tool call into session state.
-// bundle may be nil when recording fast-path decisions that skipped signal computation.
-func (e *Engine) recordCall(req *Request, d *Decision, composite float64) {
-	e.recordCallWithBundle(req, d, composite, nil)
-}
-
-func (e *Engine) recordCallWithBundle(req *Request, d *Decision, composite float64, bundle *signals.SignalBundle) {
-	if req.AgentID == "" {
-		return
-	}
-	s := e.getOrCreateSession(req.AgentID)
-	if s == nil {
-		return
-	}
-	argSummary := req.Tool
-	if cmd, ok := req.Arguments["command"]; ok {
-		if cs, ok := cmd.(string); ok {
-			if len(cs) > 80 {
-				cs = cs[:80]
-			}
-			argSummary = cs
-		}
-	}
-	primaryVerb := ""
-	if cmd, ok := req.Arguments["command"]; ok {
-		if cmdStr, ok := cmd.(string); ok && cmdStr != "" {
-			fields := strings.Fields(cmdStr)
-			if len(fields) > 0 {
-				primaryVerb = fields[0]
-			}
-		}
-	}
-	tc := session.ToolCall{
-		Time:           time.Now(),
-		Tool:           req.Tool,
-		ArgSummary:     argSummary,
-		PrimaryVerb:    primaryVerb,
-		Decision:       string(d.Action),
-		Rule:           d.Rule,
-		CompositeScore: composite,
-	}
-	// Propagate path context so Phase 2 sequence rules can detect
-	// exfil_after_sensitive_read and escalating_access patterns.
-	if bundle != nil {
-		tc.PathSensitive = bundle.Path.HasSensitive
-		tc.PathCritical = bundle.Path.HasCritical
-		tc.NetworkWrite = bundle.Network.HasDataFlag || bundle.Network.Score > 0.5
-	}
-	s.Record(tc)
-}
-
-// checkAllowlist returns (true, ruleName) if the request matches the project allowlist.
-// The allowlist is loaded from req.CWD/.aegis/allowlist.yaml (cached per CWD).
-func (e *Engine) checkAllowlist(req *Request, _ string) (bool, string) {
-	al := e.allowlistForCWD(req.CWD)
-	if al == nil {
-		return false, ""
-	}
-	if cmd, ok := req.Arguments["command"]; ok {
-		if cmdStr, ok := cmd.(string); ok && al.MatchesCommand(cmdStr) {
-			return true, "allowlist_command"
-		}
-	}
-	for _, key := range []string{"path", "file", "filename"} {
-		if p, ok := req.Arguments[key]; ok {
-			if pathStr, ok := p.(string); ok && al.IsSafePath(pathStr) {
-				return true, "allowlist_path"
-			}
-		}
-	}
-	return false, ""
-}
-
 func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signals.SessionHistoryEntry {
 	entries := make([]signals.SessionHistoryEntry, len(calls))
 	for i, c := range calls {
@@ -376,19 +295,18 @@ func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signa
 			Decision:       c.Decision,
 			Rule:           c.Rule,
 			CompositeScore: c.CompositeScore,
-			PathSensitive:  c.PathSensitive, // enables exfil_after_sensitive_read detection
-			PathCritical:   c.PathCritical,  // enables escalating_access detection
+			PathSensitive:  c.PathSensitive,
+			PathCritical:   c.PathCritical,
 			NetworkWrite:   c.NetworkWrite,
 		}
 	}
 	return entries
 }
 
-// ComputeSignals computes all 6 signals for a tool call without evaluating rules.
-// Used by observability and demo tooling to visualize signal breakdown.
+// ComputeSignals computes all signals for a tool call without evaluating rules.
 func (e *Engine) ComputeSignals(tool, command, cwd string) *signals.SignalBundle {
 	argsJSON := marshalArgs(map[string]any{"command": command})
-	return e.computeSignals(tool, argsJSON, cwd)
+	return e.sigComp.Compute(tool, argsJSON, cwd)
 }
 
 // ExportSignals is an alias for ComputeSignals for use in demo/observability code.
@@ -405,113 +323,8 @@ func (e *Engine) EvaluateJSON(ctx context.Context, tool, argsJSON, cwd string) *
 	return e.Evaluate(ctx, &Request{Tool: tool, Arguments: args, CWD: cwd})
 }
 
-// WithIntentClassifier wires a Phase 3 LLM intent classifier into the engine.
-// Accepts any IntentClassifier implementation (including test mocks).
-func WithIntentClassifier(c IntentClassifier) Option {
-	return func(e *Engine) { e.intentClassifier = c }
-}
-
-// WithAllowlist sets a fixed allowlist used for all requests regardless of CWD.
-func WithAllowlist(cfg *allowlist.Config) Option {
-	return func(e *Engine) {
-		e.allowlistMu.Lock()
-		e.allowlists[""] = cfg // empty key = fixed for all requests
-		e.allowlistMu.Unlock()
-	}
-}
-
-// WithAllowlistFromCWD pre-loads an allowlist for a specific project directory.
-func WithAllowlistFromCWD(cwd string) Option {
-	return func(e *Engine) {
-		e.allowlistMu.Lock()
-		e.allowlists[cwd] = allowlist.Load(cwd)
-		e.allowlistMu.Unlock()
-	}
-}
-
-// allowlistForCWD returns the allowlist for a given CWD, loading from disk on first access.
-// Returns a fixed allowlist if one was set via WithAllowlist.
-func (e *Engine) allowlistForCWD(cwd string) *allowlist.Config {
-	// Check for a fixed allowlist (set via WithAllowlist)
-	e.allowlistMu.RLock()
-	if fixed, ok := e.allowlists[""]; ok {
-		e.allowlistMu.RUnlock()
-		return fixed
-	}
-	if cached, ok := e.allowlists[cwd]; ok {
-		e.allowlistMu.RUnlock()
-		return cached
-	}
-	e.allowlistMu.RUnlock()
-
-	// Load from disk and cache
-	cfg := allowlist.Load(cwd)
-	e.allowlistMu.Lock()
-	e.allowlists[cwd] = cfg
-	e.allowlistMu.Unlock()
-	return cfg
-}
-
-// computeSignals computes all 6 Phase 1 signals using the fast (AST-only) extractor.
-// Applies allowlist mutations before returning.
-func (e *Engine) computeSignals(tool, argsJSON, cwd string) *signals.SignalBundle {
-	return e.computeSignalsWithExtractor(tool, argsJSON, cwd, e.extractor, true)
-}
-
-// computeSignalsFull recomputes signals using the full extractor (with dry-run) for Phase 2.
-func (e *Engine) computeSignalsFull(tool, argsJSON, cwd string) *signals.SignalBundle {
-	return e.computeSignalsWithExtractor(tool, argsJSON, cwd, e.fullExtractor, true)
-}
-
-// computeSignalsWithExtractor is the shared implementation for both Phase 1 and Phase 2.
-// applyAllowlist controls whether allowlist mutations are applied to the resulting bundle.
-func (e *Engine) computeSignalsWithExtractor(tool, argsJSON, cwd string, ext *extract.Extractor, applyAllowlist bool) *signals.SignalBundle {
-	toolClass := signals.ClassifyTool(tool)
-	cmd := signals.AnalyzeCommand(tool, argsJSON, ext)
-
-	// Collect @file paths from data-upload flags (e.g. curl -d @/etc/passwd)
-	extraPaths := append([]string(nil), cmd.Paths...)
-	for _, c := range cmd.Commands {
-		if hasDataFile, filePath := signals.HasDataFilePattern(c.Args); hasDataFile && filePath != "" {
-			extraPaths = append(extraPaths, filePath)
-		}
-	}
-	pathSig := signals.AnalyzePathsFromArgs(tool, argsJSON, cwd, extraPaths)
-	netSig := signals.AnalyzeNetworkFromExtracted(cmd)
-	dlpSig := signals.ScanDLP(argsJSON)
-	evasionSig := signals.AnalyzeEvasion(cmd, argsJSON)
-
-	bundle := &signals.SignalBundle{
-		ToolClass: toolClass,
-		Command:   cmd,
-		Path:      pathSig,
-		Network:   netSig,
-		DLP:       dlpSig,
-		Evasion:   evasionSig,
-	}
-
-	// Populate MLScore from command arguments
-	var args map[string]any
-	if json.Unmarshal([]byte(argsJSON), &args) == nil {
-		for _, key := range []string{"command", "cmd", "script", "shell"} {
-			if cmd, ok := args[key].(string); ok && cmd != "" {
-				bundle.MLScore = mlScorer.Score(cmd)
-				break
-			}
-		}
-	}
-
-	if applyAllowlist {
-		if al := e.allowlistForCWD(cwd); al != nil {
-			e.applyAllowlistMutations(bundle, al)
-		}
-	}
-	return bundle
-}
-
 // applyAllowlistMutations mutates a signal bundle to reflect project allowlist exceptions.
-func (e *Engine) applyAllowlistMutations(bundle *signals.SignalBundle, al *allowlist.Config) {
-	// Downgrade sensitive flag for explicitly allow-listed paths
+func applyAllowlistMutations(bundle *signals.SignalBundle, al *allowlist.Config) {
 	for i := range bundle.Path.Paths {
 		if bundle.Path.Paths[i].Sensitive && al.IsSafePath(bundle.Path.Paths[i].Raw) {
 			bundle.Path.Paths[i].Sensitive = false
@@ -525,7 +338,6 @@ func (e *Engine) applyAllowlistMutations(bundle *signals.SignalBundle, al *allow
 		}
 	}
 
-	// Mark configured hosts as known-safe, then recompute network score
 	changed := false
 	for i := range bundle.Network.Hosts {
 		if !bundle.Network.Hosts[i].IsKnownSafe && al.IsAllowedHost(bundle.Network.Hosts[i].Host) {
@@ -537,7 +349,6 @@ func (e *Engine) applyAllowlistMutations(bundle *signals.SignalBundle, al *allow
 		bundle.Network = signals.RecomputeNetworkScore(bundle.Network)
 	}
 }
-
 
 func buildEvidence(b *signals.SignalBundle) []string {
 	var ev []string
@@ -585,7 +396,7 @@ func marshalArgs(args map[string]any) string {
 // benignCorpusCase is the subset of fields needed from JSONL for bloom seeding.
 type benignCorpusCase struct {
 	Tool      string `json:"tool"`
-	Arguments string `json:"arguments"` // raw JSON string in old format
+	Arguments string `json:"arguments"`
 }
 
 func (e *Engine) loadBenignCorpus(path string) error {
@@ -617,7 +428,6 @@ func (e *Engine) loadBenignCorpus(path string) error {
 }
 
 func defaultCorpusPaths() []string {
-	// Try paths relative to binary location and common development layouts
 	exe, _ := os.Executable()
 	exeDir := filepath.Dir(exe)
 	return []string{
