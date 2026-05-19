@@ -125,8 +125,8 @@ func WithAllowlistFromCWD(cwd string) Option {
 	}
 }
 
-// WithPolicyMode sets the policy evaluation mode (legacy|yaml|hybrid).
-// Default is legacy for zero-regression safety.
+// WithPolicyMode sets the policy evaluation mode (yaml|hybrid).
+// Default is yaml — YAML is now the sole source of truth.
 func WithPolicyMode(mode string) Option {
 	return func(e *Engine) {
 		e.policyMode = mode
@@ -148,12 +148,11 @@ func NewEngine(opts ...Option) (*Engine, error) {
 	sigComp := newDefaultSignalComputer(fast, full, fp)
 
 	e := &Engine{
-		fastPath:  fp,
-		evaluator: newStaticRuleEvaluator(rules.Phase1Rules()),
-		sigComp:   sigComp,
-		sessions:  store,
-		recorder:  newSessionRecorder(store),
-		bloom:     bl,
+		fastPath: fp,
+		sigComp:  sigComp,
+		sessions: store,
+		recorder: newSessionRecorder(store),
+		bloom:    bl,
 	}
 
 	for _, opt := range opts {
@@ -164,24 +163,21 @@ func NewEngine(opts ...Option) (*Engine, error) {
 	evalMode := policy.ModeFromEnv()
 	if e.policyMode != "" {
 		switch strings.ToLower(e.policyMode) {
-		case "yaml":
-			evalMode = policy.ModeYAML
 		case "hybrid":
 			evalMode = policy.ModeHybrid
 		default:
-			evalMode = policy.ModeLegacy
+			evalMode = policy.ModeYAML
 		}
 	}
 
-	var yamlRules []policy.CompiledRule
-	if evalMode != policy.ModeLegacy {
-		yamlRules = loadYAMLRules()
-	}
-
+	yamlRules := loadYAMLRules()
 	if pe, err := policy.NewPolicyEvaluator(evalMode, yamlRules); err == nil {
 		e.evaluator = pe
 	}
-	// If PolicyEvaluator fails, fall back to existing staticRuleEvaluator (already set above).
+	// If PolicyEvaluator fails, fall back to a no-op static evaluator.
+	if e.evaluator == nil {
+		e.evaluator = newStaticRuleEvaluator(nil)
+	}
 
 	if e.bloom.Len() == 0 {
 		for _, candidate := range defaultCorpusPaths() {

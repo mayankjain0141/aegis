@@ -8,19 +8,40 @@ import (
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
 
-func TestPolicyEvaluator_LegacyMode(t *testing.T) {
-	eval, err := policy.NewPolicyEvaluator(policy.ModeLegacy, nil)
+func TestPolicyEvaluator_YAMLMode_SystemControl(t *testing.T) {
+	yamlRules := `
+rules:
+  - name: system_control
+    priority: 11
+    action: deny
+    severity: critical
+    confidence: 0.99
+    description: "Command attempts system control"
+    condition:
+      and:
+        - any_verb: [shutdown, reboot, halt, poweroff]
+        - tool_category: shell
+`
+	pf, err := policy.LoadString(yamlRules)
+	if err != nil {
+		t.Fatalf("LoadString: %v", err)
+	}
+	compiled, err := policy.CompileFile(pf)
+	if err != nil {
+		t.Fatalf("CompileFile: %v", err)
+	}
+
+	eval, err := policy.NewPolicyEvaluator(policy.ModeYAML, compiled)
 	if err != nil {
 		t.Fatalf("NewPolicyEvaluator: %v", err)
 	}
-	// system_control rule: shutdown with shell category should deny
 	bundle := &signals.SignalBundle{}
 	bundle.Command.Verbs = []string{"shutdown"}
 	bundle.ToolClass.Category = "shell"
 
 	rule, matched := eval.Evaluate(bundle)
 	if !matched {
-		t.Fatal("legacy mode should match system_control rule")
+		t.Fatal("yaml mode should match system_control rule")
 	}
 	if rule.Name != "system_control" {
 		t.Errorf("expected system_control, got %q", rule.Name)
@@ -47,7 +68,6 @@ func TestPolicyEvaluator_YAMLMode_RequiresRules(t *testing.T) {
 }
 
 func TestPolicyEvaluator_HybridMode(t *testing.T) {
-	// Hybrid mode: YAML rules take precedence on name collision, legacy fills gaps
 	yamlRules := `
 rules:
   - name: raw_socket_open
@@ -67,7 +87,6 @@ rules:
 		t.Fatalf("NewPolicyEvaluator: %v", err)
 	}
 
-	// nc should match via YAML rule (not legacy)
 	bundle := &signals.SignalBundle{}
 	bundle.Command.Verbs = []string{"nc"}
 	rule, matched := eval.Evaluate(bundle)
@@ -80,18 +99,24 @@ rules:
 }
 
 func TestPolicyEvaluator_EnvVarSwitch(t *testing.T) {
-	// AEGIS_POLICY_MODE env var controls mode
+	// "legacy" env value now maps to ModeYAML (graceful downgrade)
 	os.Setenv("AEGIS_POLICY_MODE", "legacy")
 	defer os.Unsetenv("AEGIS_POLICY_MODE")
 
 	mode := policy.ModeFromEnv()
-	if mode != policy.ModeLegacy {
-		t.Errorf("expected ModeLegacy from env, got %v", mode)
+	if mode != policy.ModeYAML {
+		t.Errorf("expected ModeYAML for legacy env value (graceful downgrade), got %v", mode)
 	}
 
 	os.Setenv("AEGIS_POLICY_MODE", "yaml")
 	mode = policy.ModeFromEnv()
 	if mode != policy.ModeYAML {
 		t.Errorf("expected ModeYAML from env, got %v", mode)
+	}
+
+	os.Setenv("AEGIS_POLICY_MODE", "hybrid")
+	mode = policy.ModeFromEnv()
+	if mode != policy.ModeHybrid {
+		t.Errorf("expected ModeHybrid from env, got %v", mode)
 	}
 }

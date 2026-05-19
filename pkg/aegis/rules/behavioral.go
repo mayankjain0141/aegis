@@ -10,8 +10,8 @@ type BehavioralBundle struct {
 	Behavior signals.BehavioralSignal
 }
 
-// BehavioralEvaluate evaluates behavioral rules.
-// Returns a decision and true if a rule fired, or zero and false.
+// Deprecated: BehavioralEvaluate will be replaced by YAML-driven behavioral rules
+// when Phase 7 runtime evaluation is complete. Currently still used by Engine.
 func BehavioralEvaluate(bundle BehavioralBundle) (Rule, bool) {
 	b2 := bundle.Behavior
 	b1 := bundle.Signals

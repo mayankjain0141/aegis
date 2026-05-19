@@ -13,51 +13,43 @@ import (
 type EvalMode int
 
 const (
-	ModeLegacy EvalMode = iota // use only legacy Go rules (default, safe)
-	ModeYAML                   // use only YAML-compiled rules
-	ModeHybrid                 // merge both; YAML takes precedence on name collision
+	ModeYAML   EvalMode = iota // use YAML-compiled rules (default)
+	ModeHybrid                 // merge YAML rules with any manually registered rules
 )
 
 // ModeFromEnv reads AEGIS_POLICY_MODE env var.
-// Returns ModeLegacy for unknown values (safe default).
+// Returns ModeYAML for unknown/legacy values — YAML is now the sole source of truth.
 func ModeFromEnv() EvalMode {
 	switch strings.ToLower(os.Getenv("AEGIS_POLICY_MODE")) {
-	case "yaml":
-		return ModeYAML
 	case "hybrid":
 		return ModeHybrid
 	default:
-		return ModeLegacy
+		return ModeYAML // legacy → yaml, unset → yaml
 	}
 }
 
 // PolicyEvaluator implements the RuleEvaluator interface (defined in pkg/aegis/evaluator.go).
-// It supports three modes: legacy, yaml, and hybrid.
+// It supports two modes: yaml (default) and hybrid.
 type PolicyEvaluator struct {
-	mode   EvalMode
-	yaml   []CompiledRule
-	legacy []rules.Rule
+	mode EvalMode
+	yaml []CompiledRule
 }
 
-// NewPolicyEvaluator creates a PolicyEvaluator.
-// yamlRules may be nil in legacy mode.
+// NewPolicyEvaluator creates a PolicyEvaluator. YAML is the default mode.
 func NewPolicyEvaluator(mode EvalMode, yamlRules []CompiledRule) (*PolicyEvaluator, error) {
 	return &PolicyEvaluator{
-		mode:   mode,
-		yaml:   yamlRules,
-		legacy: rules.Phase1Rules(),
+		mode: mode,
+		yaml: yamlRules,
 	}, nil
 }
 
 // Evaluate implements RuleEvaluator. Returns first matching rule and true, or zero and false.
 func (e *PolicyEvaluator) Evaluate(b *signals.SignalBundle) (rules.Rule, bool) {
 	switch e.mode {
-	case ModeYAML:
-		return e.evaluateYAML(b)
 	case ModeHybrid:
 		return e.evaluateHybrid(b)
-	default: // ModeLegacy
-		return rules.Evaluate(e.legacy, b)
+	default: // ModeYAML
+		return e.evaluateYAML(b)
 	}
 }
 
@@ -81,15 +73,11 @@ func (e *PolicyEvaluator) evaluateHybrid(b *signals.SignalBundle) (rules.Rule, b
 		name     string
 		fromYAML bool
 		yamlRule CompiledRule
-		legacyFn func(*signals.SignalBundle) bool
-		meta     rules.Rule
 	}
 
-	seen := make(map[string]bool)
 	var entries []hybridEntry
 
 	for _, yr := range e.yaml {
-		seen[yr.Name] = true
 		yr := yr
 		entries = append(entries, hybridEntry{
 			priority: yr.Priority,
@@ -99,42 +87,19 @@ func (e *PolicyEvaluator) evaluateHybrid(b *signals.SignalBundle) (rules.Rule, b
 		})
 	}
 
-	for _, lr := range e.legacy {
-		if seen[lr.Name] {
-			continue
-		}
-		lr := lr
-		entries = append(entries, hybridEntry{
-			priority: lr.Priority,
-			name:     lr.Name,
-			fromYAML: false,
-			legacyFn: lr.Condition,
-			meta:     lr,
-		})
-	}
-
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].priority < entries[j].priority
 	})
 
 	for _, entry := range entries {
-		var matched bool
-		if entry.fromYAML {
-			matched = entry.yamlRule.Predicate(b)
-		} else {
-			matched = entry.legacyFn(b)
-		}
-		if matched {
-			if entry.fromYAML {
-				return rules.Rule{
-					Name:       entry.yamlRule.Name,
-					Priority:   entry.yamlRule.Priority,
-					Action:     rules.Action(entry.yamlRule.Action),
-					Severity:   entry.yamlRule.Severity,
-					Confidence: entry.yamlRule.Confidence,
-				}, true
-			}
-			return entry.meta, true
+		if entry.yamlRule.Predicate(b) {
+			return rules.Rule{
+				Name:       entry.yamlRule.Name,
+				Priority:   entry.yamlRule.Priority,
+				Action:     rules.Action(entry.yamlRule.Action),
+				Severity:   entry.yamlRule.Severity,
+				Confidence: entry.yamlRule.Confidence,
+			}, true
 		}
 	}
 	return rules.Rule{}, false

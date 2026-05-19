@@ -322,59 +322,59 @@ func (s *Server) handleDemoControl(w http.ResponseWriter, r *http.Request) {
 
 var policySnippets = map[string]PolicyRef{
 	"critical_path_destruction": {
-		File: "pkg/aegis/rules/phase1.go", Line: 16,
+		File: "policies/phase1-deny.yaml", Line: 2,
 		Condition: `verb in {rm,mkfs,dd,fdisk} ∧ path.has_critical`,
-		Snippet:   "destructive := map[string]bool{\"rm\": true, \"mkfs\": true, \"dd\": true}\nif b.Command.VerbDanger[\"dd\"] > 0 { return true }\nfor _, v := range b.Command.Verbs {\n  if destructive[v] && b.Path.HasCritical { return true }\n}",
+		Snippet:   "any_verb: [rm, mkfs, dd, fdisk, shred]\npath:\n  has_critical: true",
 	},
 	"system_control": {
-		File: "pkg/aegis/rules/phase1.go", Line: 38,
+		File: "policies/phase1-deny.yaml", Line: 23,
 		Condition: `verb in {shutdown,reboot,halt,poweroff,init}`,
-		Snippet:   "return anyVerb(b, \"shutdown\", \"reboot\", \"halt\", \"poweroff\") &&\n  b.ToolClass.Category == \"shell\"",
+		Snippet:   "any_verb: [shutdown, reboot, halt, poweroff]\ntool_category: shell",
 	},
 	"raw_socket_open": {
-		File: "pkg/aegis/rules/phase1.go", Line: 48,
+		File: "policies/phase1-deny.yaml", Line: 38,
 		Condition: `verb in {nc,ncat,socat,telnet}`,
-		Snippet:   "return anyVerb(b, \"nc\", \"ncat\", \"socat\", \"telnet\")",
+		Snippet:   "any_verb: [nc, ncat, socat, telnet]",
 	},
 	"privilege_escalation": {
-		File: "pkg/aegis/rules/phase1.go", Line: 58,
+		File: "policies/phase1-deny.yaml", Line: 51,
 		Condition: `sudo/su/doas with shell target OR wrappers stripped revealing dangerous verbs`,
-		Snippet:   "if anyVerb(b, \"passwd\", \"chpasswd\", \"visudo\") { return true }\nif b.Evasion.WrappersStripped > 0 {\n  for _, v := range b.Command.Verbs {\n    if isShellInterpreterVerb(v) { return true }\n  }\n}",
+		Snippet:   "any_verb: [passwd, chpasswd, visudo]\nor:\n  - evasion:\n      wrappers_stripped_min: 1",
 	},
 	"secret_leakage": {
-		File: "pkg/aegis/rules/phase1.go", Line: 108,
+		File: "policies/phase1-deny.yaml", Line: 109,
 		Condition: `dlp.has_hit ∧ ¬dlp.all_test`,
-		Snippet:   "return b.DLP.HasHit && !b.DLP.AllTest",
+		Snippet:   "dlp:\n  has_hit: true\n  all_test: false",
 	},
 	"sensitive_file_access": {
-		File: "pkg/aegis/rules/phase1.go", Line: 118,
+		File: "policies/phase1-deny.yaml", Line: 125,
 		Condition: `path.sensitive ∧ ¬path.in_project ∧ tool_class ∈ {file_read, shell}`,
-		Snippet:   "for _, p := range b.Path.Paths {\n  if p.Sensitive { return cat==\"file_read\" || cat==\"shell\" }\n}",
+		Snippet:   "path:\n  any_sensitive: true\ntool_category: file_read",
 	},
 	"data_exfiltration": {
-		File: "pkg/aegis/rules/phase1.go", Line: 137,
+		File: "policies/phase1-deny.yaml", Line: 151,
 		Condition: `verb ∈ {curl,wget,scp} ∧ network.has_data_flag ∧ (path.sensitive ∨ stdin_pipe)`,
-		Snippet:   "return anyVerb(b, \"curl\",\"wget\",\"scp\") &&\n  b.Network.HasDataFlag &&\n  (b.Path.HasSensitive || b.Network.HasStdinPipe)",
+		Snippet:   "any_verb: [curl, wget, scp, rsync, ftp]\nnetwork:\n  has_data_flag: true",
 	},
 	"remote_code_execution": {
-		File: "pkg/aegis/rules/phase1.go", Line: 150,
+		File: "policies/phase1-deny.yaml", Line: 173,
 		Condition: `evasion.encoding_detected ∧ tool_class = shell`,
-		Snippet:   "return b.Evasion.EncodingDetected && b.ToolClass.Category == \"shell\"",
+		Snippet:   "evasion:\n  encoding_detected: true\ntool_category: shell",
 	},
 	"execute_from_tmp": {
-		File: "pkg/aegis/rules/phase1.go", Line: 162,
+		File: "policies/phase1-deny.yaml", Line: 255,
 		Condition: `binary.full_path starts with /tmp/ OR interpreter executing /tmp/* script`,
-		Snippet:   "for _, cmd := range b.Command.Commands {\n  if strings.HasPrefix(cmd.FullPath, \"/tmp/\") { return true }\n}",
+		Snippet:   "command:\n  binary_path_prefix: /tmp/",
 	},
 	"benign_git_ops": {
-		File: "pkg/aegis/rules/phase1.go", Line: 373,
+		File: "policies/phase1-allow.yaml", Line: 169,
 		Condition: `verb=git ∧ subcommand ∈ {status,add,commit,push,pull,log,...}`,
-		Snippet:   "safeSubs := map[string]bool{\"status\":true, \"add\":true, \"commit\":true, ...}\nfor _, cmd := range b.Command.Commands {\n  if cmd.Binary==\"git\" && safeSubs[cmd.Args[0]] { return true }\n}",
+		Snippet:   "any_verb: [git]\ngit_subcommand: [status, add, commit, push, pull, log, diff, checkout, branch]",
 	},
 	"benign_package_mgr": {
-		File: "pkg/aegis/rules/phase1.go", Line: 247,
+		File: "policies/phase1-allow.yaml", Line: 47,
 		Condition: `verb ∈ {npm,pip,cargo,yarn,brew,apt,...}`,
-		Snippet:   "pkgVerbs := map[string]bool{\"npm\":true, \"pip\":true, \"cargo\":true, \"yarn\":true...}\nfor _, v := range b.Command.Verbs { if pkgVerbs[v] { return true } }",
+		Snippet:   "any_verb: [npm, pip, pip3, cargo, yarn, brew, apt, apt-get, yum, dnf]",
 	},
 }
 

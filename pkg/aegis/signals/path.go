@@ -131,18 +131,13 @@ func classifyPath(p string) (risk float64, critical, sensitive bool) {
 		}
 	}
 
-	// Relative paths
-	if !filepath.IsAbs(p) {
-		return 0.05, false, false
-	}
-
-	// Specific sensitive files — check before blanket critical dir check so
-	// /etc/shadow, /etc/sudoers etc. are flagged as BOTH critical AND sensitive.
+	// Specific sensitive files — checked before the relative-path early return so
+	// traversal paths like "../../etc/shadow" are still correctly flagged.
 	sensitiveFiles := []string{"shadow", "sudoers", "passwd", "gshadow", "master.passwd"}
 	for _, sf := range sensitiveFiles {
 		if base == sf {
-			// Both critical (system dir) and sensitive (credential file)
-			return 0.95, true, true
+			crit := isCriticalPrefix(p)
+			return 0.95, crit, true
 		}
 	}
 
@@ -155,7 +150,8 @@ func classifyPath(p string) (risk float64, critical, sensitive bool) {
 		}
 	}
 
-	// Sensitive path patterns
+	// Sensitive path patterns — checked before the relative-path early return so
+	// paths like ".env" and "credentials.json" are always flagged as sensitive.
 	sensitivePatterns := []struct {
 		substr string
 		risk   float64
@@ -180,10 +176,14 @@ func classifyPath(p string) (risk float64, critical, sensitive bool) {
 	}
 	for _, sp := range sensitivePatterns {
 		if strings.Contains(lower, strings.ToLower(sp.substr)) {
-			// Mark as both critical and sensitive if also in a system dir
 			crit := isCriticalPrefix(p)
 			return sp.risk, crit, true
 		}
+	}
+
+	// Relative paths (not matching any sensitive pattern above)
+	if !filepath.IsAbs(p) {
+		return 0.05, false, false
 	}
 
 	// Critical system directories
