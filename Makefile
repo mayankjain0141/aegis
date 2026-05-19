@@ -1,4 +1,4 @@
-.PHONY: build install test smoke test-attacks bench lint fmt ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs ml-test ml-train
+.PHONY: build install test smoke test-attacks bench lint fmt ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs ml-test ml-train models
 
 build:
 	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
@@ -66,7 +66,7 @@ logs:
 
 # ── ML Model ─────────────────────────────────────────────────────────────────
 
-# Run ML scorer unit tests (heuristic + leaves inference path).
+# Run ML scorer unit tests (XGBoost + heuristic fallback paths).
 ml-test:
 	go test ./pkg/aegis/signals/... -run TestMLScore -v -count=1
 
@@ -79,6 +79,31 @@ ml-train:
 		--attacks testdata/eval/attacks.jsonl \
 		--benign  testdata/eval/benign.jsonl \
 		--out     policies/data/ml_score.model
+
+# Download and convert the QuasarNix XGBoost model artifacts.
+# Requires: pip install xgboost (for UBJSON → JSON conversion)
+# The converted quasarnix.json is already committed; run this only to refresh.
+models: ## Download QuasarNix XGBoost model and vocab
+	@mkdir -p pkg/aegis/signals/models
+	@echo "Downloading QuasarNix model..."
+	curl -fL -o pkg/aegis/signals/models/quasarnix.xgboost \
+		"https://huggingface.co/dtrizna/QuasarNix/resolve/main/quasarnix_model_data_full_xgb_adv.xgboost"
+	@echo "Downloading QuasarNix vocab..."
+	curl -fL -o pkg/aegis/signals/models/quasarnix_vocab.json \
+		"https://huggingface.co/dtrizna/QuasarNix/resolve/main/quasarnix_tokenizer_data_full_onehot_adv.json"
+	@echo "Converting UBJSON → JSON for Go parser..."
+	python3 -c "\
+import sys; \
+try: \
+    import xgboost as xgb; \
+    m = xgb.Booster(); \
+    m.load_model('pkg/aegis/signals/models/quasarnix.xgboost'); \
+    m.save_model('pkg/aegis/signals/models/quasarnix.json'); \
+    print('Converted .xgboost -> .json via xgboost library') \
+except ImportError: \
+    print('Note: pip install xgboost to convert model. Using pre-converted quasarnix.json if available.') \
+" 2>/dev/null || true
+	@echo "Model files ready in pkg/aegis/signals/models/"
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 

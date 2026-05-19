@@ -1,172 +1,295 @@
 package signals
 
 import (
+	"encoding/json"
+	"fmt"
 	"math"
+	"os"
 	"strings"
-
-	"github.com/dmitryikh/leaves"
+	"sync"
 )
 
-// featureCount is the fixed dimension of the one-hot feature vector fed to the model.
-// Changing this requires retraining the model.
-const featureCount = 64
-
-// tokenVocab is the ordered vocabulary for one-hot encoding.
-// Tokens at index i map to feature i in the vector.
-// Tokens beyond index featureCount-2 are ignored; index featureCount-1 is
-// a catch-all "has_unknown_token" bit.
-var tokenVocab = []string{
-	// pipe-to-shell patterns
-	"| bash", "| sh", "|bash", "|sh", "| python", "|python",
-	// reverse shell primitives
-	"nc -e", "ncat -e", "/dev/tcp/", "bash -i", "socat exec",
-	// inline eval
-	"exec(", "eval(", "system(", "os.system", "__import__", "base64 -d",
-	// interpreter -c patterns
-	"perl -e", "python -c", "python3 -c", "ruby -e", "node -e",
-	// download helpers
-	"curl ", "wget ", "fetch ",
-	// execution helpers
-	"bash ", " sh ", "| sh", "|sh", "exec ",
-	// privilege escalation
-	"sudo ", "su -", "chmod +s", "chmod 4",
-	// persistence patterns
-	"crontab", ".bashrc", ".profile", "/etc/cron",
-	// obfuscation
-	"base64", "xxd", "hex", "\\x", "eval $",
-	// data exfiltration patterns
-	"> /dev/tcp", "> /dev/udp", "curl -d", "wget --post",
-	// process injection
-	"/proc/", "ptrace", "LD_PRELOAD",
-	// benign prefixes (negative signal)
-	"git ", "go ", "npm ", "yarn ", "make ",
-	"ls ", "cat ", "mkdir ", "touch ", "grep ",
-	"echo ", "cd ", "pwd ", "which ", "find ",
+// xgbTree is a single decision tree from the XGBoost JSON model.
+type xgbTree struct {
+	LeftChildren    []int     `json:"left_children"`
+	RightChildren   []int     `json:"right_children"`
+	SplitIndices    []int     `json:"split_indices"`
+	SplitConditions []float64 `json:"split_conditions"`
+	DefaultLeft     []int     `json:"default_left"`
 }
 
-// MLScorer scores shell commands for maliciousness.
-// When a LightGBM/XGBoost model file is provided and loads successfully,
-// it uses leaves for inference. Otherwise it falls back to the heuristic scorer.
+// xgbModel is the parsed top-level XGBoost JSON structure.
+type xgbModel struct {
+	Trees      []xgbTree
+	NFeatures  int
+	BaseMargin float64
+}
+
+// xgbModelJSON mirrors the JSON structure from quasarnix.json.
+type xgbModelJSON struct {
+	Learner struct {
+		LearnerModelParam struct {
+			NumFeature string `json:"num_feature"`
+			BaseScore  string `json:"base_score"`
+		} `json:"learner_model_param"`
+		GradientBooster struct {
+			Model struct {
+				Trees []xgbTree `json:"trees"`
+			} `json:"model"`
+		} `json:"gradient_booster"`
+	} `json:"learner"`
+}
+
+// MLScorer scores shell commands for maliciousness using the QuasarNix XGBoost model.
+// Falls back to a heuristic when model files are not available.
 type MLScorer struct {
-	available bool
-	model     *leaves.Ensemble // nil when using heuristic fallback
+	available    bool
+	UseHeuristic bool
+	model        *xgbModel
+	vocab        map[string]int
 }
 
-// NewMLScorer creates a scorer. If modelPath is non-empty and refers to a
-// valid LightGBM text model file, the scorer uses leaves for inference.
-// On any load error it silently falls back to the heuristic — callers need
-// not handle errors.
-func NewMLScorer(modelPath string) *MLScorer {
-	if modelPath != "" {
-		if m, err := leaves.LGEnsembleFromFile(modelPath, true); err == nil {
-			return &MLScorer{available: true, model: m}
+// scorerCache is a package-level singleton so the model is loaded once.
+var (
+	defaultScorer     *MLScorer
+	defaultScorerOnce sync.Once
+)
+
+// NewMLScorer creates an MLScorer. modelPath and vocabPath may be "" to use defaults.
+// Falls back to heuristic scoring when model files are absent.
+func NewMLScorer(modelPath, vocabPath string) *MLScorer {
+	if modelPath == "" || vocabPath == "" {
+		// Try default paths relative to common working directories.
+		candidates := []struct{ model, vocab string }{
+			{
+				"pkg/aegis/signals/models/quasarnix.json",
+				"pkg/aegis/signals/models/quasarnix_vocab.json",
+			},
+			{
+				"../../pkg/aegis/signals/models/quasarnix.json",
+				"../../pkg/aegis/signals/models/quasarnix_vocab.json",
+			},
+			{
+				"models/quasarnix.json",
+				"models/quasarnix_vocab.json",
+			},
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c.model); err == nil {
+				if _, err := os.Stat(c.vocab); err == nil {
+					modelPath = c.model
+					vocabPath = c.vocab
+					break
+				}
+			}
 		}
 	}
-	return &MLScorer{available: true}
+
+	if modelPath == "" || vocabPath == "" {
+		// No model files found — use heuristic.
+		return &MLScorer{available: true, UseHeuristic: true}
+	}
+
+	model, err := loadXGBModel(modelPath)
+	if err != nil {
+		return &MLScorer{available: true, UseHeuristic: true}
+	}
+	vocab, err := LoadVocab(vocabPath)
+	if err != nil {
+		return &MLScorer{available: true, UseHeuristic: true}
+	}
+
+	return &MLScorer{
+		available:    true,
+		UseHeuristic: false,
+		model:        model,
+		vocab:        vocab,
+	}
 }
 
-// Available returns true if the scorer is ready to score.
+// Available returns true when the scorer is ready.
 func (s *MLScorer) Available() bool { return s.available }
 
-// Score returns a maliciousness score in [0.0, 1.0] for the given command string.
-// When a model is loaded it predicts from a tokenized feature vector;
-// otherwise it uses the built-in heuristic.
+// Score returns a maliciousness score [0.0, 1.0] for the given command string.
 func (s *MLScorer) Score(cmd string) float64 {
 	if !s.available {
 		return 0.0
 	}
-	if s.model != nil {
-		fvals := tokenize(cmd)
-		raw := s.model.PredictSingle(fvals, 0)
-		// LightGBM binary classification outputs a raw log-odds value;
-		// convert to probability with sigmoid.
-		return sigmoid(raw)
+	if s.UseHeuristic {
+		return scoreCommand(cmd)
 	}
-	return scoreHeuristic(cmd)
+	return s.scoreWithModel(cmd)
 }
 
-// tokenize converts a command string into a fixed-length feature vector
-// suitable for input to the gradient-boosted tree model.
-// Each element is 1.0 if the corresponding token is present in the command,
-// 0.0 otherwise. The last element is a catch-all for any unrecognised token.
-func tokenize(cmd string) []float64 {
-	lower := strings.ToLower(cmd)
-	fvals := make([]float64, featureCount)
+func (s *MLScorer) scoreWithModel(cmd string) float64 {
+	features := s.encode(cmd)
 
-	knownTokens := len(tokenVocab)
-	if knownTokens > featureCount-1 {
-		knownTokens = featureCount - 1
+	margin := s.model.BaseMargin
+	for i := range s.model.Trees {
+		margin += predictTree(&s.model.Trees[i], features)
 	}
+	return 1.0 / (1.0 + math.Exp(-margin)) // sigmoid
+}
 
-	hasUnknown := false
-	words := strings.Fields(lower)
-	wordSet := make(map[string]bool, len(words))
-	for _, w := range words {
-		wordSet[w] = true
+// encode converts a command string to a one-hot feature vector using char n-grams.
+// Absent tokens are represented as NaN (goes RIGHT in XGBoost tree traversal).
+func (s *MLScorer) encode(cmd string) []float64 {
+	features := make([]float64, s.model.NFeatures)
+	for i := range features {
+		features[i] = math.NaN() // absent = NaN (goes RIGHT in tree)
 	}
-
-	for i := 0; i < knownTokens; i++ {
-		tok := tokenVocab[i]
-		if strings.Contains(lower, tok) {
-			fvals[i] = 1.0
+	for _, tok := range tokenizeNgram(cmd) {
+		if idx, ok := s.vocab[tok]; ok && idx < len(features) {
+			features[idx] = 1.0
 		}
 	}
+	return features
+}
 
-	// Mark catch-all if any word is not a substring of any known token.
-	for w := range wordSet {
-		found := false
-		for _, tok := range tokenVocab[:knownTokens] {
-			if strings.Contains(tok, w) || strings.Contains(w, tok) {
-				found = true
+// predictTree traverses a single XGBoost decision tree.
+func predictTree(tree *xgbTree, features []float64) float64 {
+	node := 0
+	for tree.LeftChildren[node] != -1 { // not a leaf
+		fidx := tree.SplitIndices[node]
+		val := features[fidx]
+		var goLeft bool
+		if math.IsNaN(val) {
+			goLeft = tree.DefaultLeft[node] == 1
+		} else {
+			goLeft = val < tree.SplitConditions[node]
+		}
+		if goLeft {
+			node = tree.LeftChildren[node]
+		} else {
+			node = tree.RightChildren[node]
+		}
+	}
+	return tree.SplitConditions[node] // leaf value
+}
+
+// tokenizeNgram generates deduplicated character n-grams of length 1–3 from cmd.
+func tokenizeNgram(cmd string) []string {
+	seen := make(map[string]bool)
+	var tokens []string
+	for i := range cmd {
+		for l := 1; l <= 3; l++ {
+			end := i + l
+			if end > len(cmd) {
 				break
 			}
-		}
-		if !found {
-			hasUnknown = true
-			break
+			tok := cmd[i:end]
+			if !seen[tok] {
+				seen[tok] = true
+				tokens = append(tokens, tok)
+			}
 		}
 	}
-	if hasUnknown {
-		fvals[featureCount-1] = 1.0
+	return tokens
+}
+
+// LoadVocab reads the vocab JSON file: map[string]int (token → feature index).
+func LoadVocab(path string) (map[string]int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read vocab %s: %w", path, err)
+	}
+	var vocab map[string]int
+	if err := json.Unmarshal(data, &vocab); err != nil {
+		return nil, fmt.Errorf("parse vocab: %w", err)
+	}
+	if len(vocab) == 0 {
+		return nil, fmt.Errorf("vocab is empty")
+	}
+	return vocab, nil
+}
+
+// loadXGBModel reads and parses the XGBoost JSON model.
+func loadXGBModel(path string) (*xgbModel, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read model %s: %w", path, err)
+	}
+	var raw xgbModelJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse model JSON: %w", err)
 	}
 
-	return fvals
+	// Parse num_feature (stored as string "4096").
+	var nFeatures int
+	fmt.Sscanf(raw.Learner.LearnerModelParam.NumFeature, "%d", &nFeatures)
+	if nFeatures == 0 {
+		return nil, fmt.Errorf("model has 0 features")
+	}
+
+	// Parse base_score (stored as "[4.999895E-1]" — strip brackets).
+	baseScoreStr := strings.Trim(raw.Learner.LearnerModelParam.BaseScore, "[]")
+	var baseScore float64
+	fmt.Sscanf(baseScoreStr, "%f", &baseScore)
+	if baseScore <= 0 || baseScore >= 1 {
+		baseScore = 0.5 // safe default
+	}
+	baseMargin := math.Log(baseScore / (1 - baseScore)) // logit transform
+
+	trees := raw.Learner.GradientBooster.Model.Trees
+	if len(trees) == 0 {
+		return nil, fmt.Errorf("model has no trees")
+	}
+
+	return &xgbModel{
+		Trees:      trees,
+		NFeatures:  nFeatures,
+		BaseMargin: baseMargin,
+	}, nil
 }
 
-func sigmoid(x float64) float64 {
-	return 1.0 / (1.0 + math.Exp(-x))
-}
-
-// scoreHeuristic is the original pattern-based scorer used when no model is loaded.
-func scoreHeuristic(cmd string) float64 {
+// scoreCommand is the heuristic fallback when no model is loaded.
+// Kept for graceful degradation when model files are unavailable.
+func scoreCommand(cmd string) float64 {
 	lower := strings.ToLower(cmd)
 	score := 0.0
 
-	if containsAny(lower, []string{"| bash", "| sh", "|bash", "|sh", "| python", "|python"}) {
-		score += 0.7
+	if matchesAny(lower, []string{"| bash", "| sh", "|bash", "|sh", "| python", "|python", "curl", "wget"}) {
+		if matchesAny(lower, []string{"| bash", "|bash", "| sh", "|sh", "| python", "|python"}) {
+			score += 0.7
+		}
 	}
-	if containsAny(lower, []string{"nc -e", "ncat -e", "/dev/tcp/", "bash -i", "socat exec"}) {
+	if matchesAny(lower, []string{"nc -e", "nc -l", "ncat -e", "/dev/tcp/", "bash -i", "socat.*exec"}) {
 		score += 0.8
 	}
-	if containsAny(lower, []string{"exec(", "eval(", "system(", "os.system", "__import__", "base64 -d"}) {
+	if matchesAny(lower, []string{"exec(", "eval(", "system(", "os.system", "subprocess", "__import__", "base64.decode", "base64 -d"}) {
 		score += 0.5
 	}
-	if containsAny(lower, []string{"perl -e", "python -c", "python3 -c", "ruby -e", "node -e"}) {
-		score += 0.75
-	}
 	hasFetch := containsAny(lower, []string{"curl ", "wget ", "fetch "})
-	hasExec := containsAny(lower, []string{"bash", " sh ", " sh\n", "| sh", "|sh", "exec", "python", "perl"})
+	hasExec := containsAny(lower, []string{"bash", "sh", "exec", "python", "perl", "ruby"})
 	if hasFetch && hasExec {
 		score += 0.4
 	}
-	benignPrefixes := []string{"git ", "go ", "npm ", "yarn ", "make ", "ls ", "cat ", "mkdir ", "touch "}
-	for _, p := range benignPrefixes {
-		if strings.HasPrefix(lower, p) {
+	if matchesAny(lower, []string{"perl -e", "python -c", "python3 -c", "ruby -e", "node -e"}) {
+		score += 0.4
+	}
+	benignVerbs := []string{"git ", "go ", "npm ", "yarn ", "make ", "ls ", "cat ", "cd ", "mkdir ", "touch "}
+	for _, v := range benignVerbs {
+		if strings.HasPrefix(lower, v) || strings.Contains(lower, " && "+v) {
 			score -= 0.3
 			break
 		}
 	}
-	return math.Max(0.0, math.Min(1.0, score))
+	if score > 1.0 {
+		return 1.0
+	}
+	if score < 0.0 {
+		return 0.0
+	}
+	return score
+}
+
+func matchesAny(s string, patterns []string) bool {
+	for _, p := range patterns {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsAny(s string, subs []string) bool {

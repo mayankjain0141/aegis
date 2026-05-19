@@ -24,7 +24,8 @@ import (
 )
 
 // mlScorer is the default ML scorer used when no WithMLModel option is given.
-var mlScorer = signals.NewMLScorer("")
+// Empty strings trigger auto-discovery of model files from default paths.
+var mlScorer = signals.NewMLScorer("", "")
 
 // EvaluationStage identifies which layer of the evaluation cascade produced a Decision.
 type EvaluationStage string
@@ -134,11 +135,12 @@ func WithPolicyMode(mode string) Option {
 	}
 }
 
-// WithMLModel loads a LightGBM model from modelPath and uses it for ML scoring.
+// WithMLModel loads an XGBoost model from modelPath and uses it for ML scoring.
 // If modelPath is empty or the file cannot be loaded, the heuristic scorer is used.
+// vocabPath may be empty to use auto-discovery.
 func WithMLModel(modelPath string) Option {
 	return func(e *Engine) {
-		e.scorer = signals.NewMLScorer(modelPath)
+		e.scorer = signals.NewMLScorer(modelPath, "")
 	}
 }
 

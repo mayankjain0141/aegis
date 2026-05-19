@@ -16,3 +16,6 @@ docs/
 .cursor/plans/
 key.pem
 *.sock
+# XGBoost binary model (UBJSON format — use quasarnix.json instead)
+pkg/aegis/signals/models/*.xgboost
+pkg/aegis/signals/models/*.bin
