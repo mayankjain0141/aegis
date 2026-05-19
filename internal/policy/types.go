@@ -30,6 +30,7 @@ type Condition struct {
 	DLP          *DLPCond                 `yaml:"dlp,omitempty"`
 	Evasion      *EvasionCond             `yaml:"evasion,omitempty"`
 	VerbDanger   map[string]ThresholdCond `yaml:"verb_danger,omitempty"`
+	Behavioral   *BehavioralCond          `yaml:"behavioral,omitempty"`
 
 	// Combinators
 	And []Condition `yaml:"and,omitempty"`
@@ -42,6 +43,15 @@ type Condition struct {
 	// Tier 3: Rego
 	Rego     string `yaml:"rego,omitempty"`
 	RegoRule string `yaml:"rego_rule,omitempty"`
+}
+
+// BehavioralCond matches against session behavioral signals.
+// These conditions are evaluated by the behavioral engine, not the per-call static evaluator.
+type BehavioralCond struct {
+	RetryAfterDeny    *bool          `yaml:"retry_after_deny,omitempty"`
+	SequenceRisk      *ThresholdCond `yaml:"sequence_risk,omitempty"`
+	RateBurst         *ThresholdCond `yaml:"rate_burst,omitempty"`
+	BaselineDeviation *ThresholdCond `yaml:"baseline_deviation,omitempty"`
 }
 
 // PathCond is the path sub-condition.

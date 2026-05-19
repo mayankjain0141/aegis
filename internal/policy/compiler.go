@@ -199,6 +199,12 @@ func compileCondition(cond Condition) (Predicate, error) {
 		})
 	}
 
+	// Behavioral conditions require session history — evaluated separately by the behavioral
+	// engine, not the per-call static evaluator. Always-false in Phase 1 context.
+	if cond.Behavioral != nil {
+		predicates = append(predicates, func(*signals.SignalBundle) bool { return false })
+	}
+
 	// Combinators
 	if len(cond.And) > 0 {
 		var subs []Predicate

@@ -14,7 +14,7 @@ var validSeverities = []string{"critical", "high", "medium", "low", ""}
 
 var knownConditionFields = []string{
 	"any_verb", "all_verbs_safe", "tool_category",
-	"path", "network", "dlp", "evasion", "verb_danger",
+	"path", "network", "dlp", "evasion", "verb_danger", "behavioral",
 	"and", "or", "not",
 	"expr", "rego", "rego_rule",
 }
@@ -110,6 +110,7 @@ func (c *Condition) UnmarshalYAML(value *yaml.Node) error {
 		DLP          *DLPCond                 `yaml:"dlp,omitempty"`
 		Evasion      *EvasionCond             `yaml:"evasion,omitempty"`
 		VerbDanger   map[string]ThresholdCond `yaml:"verb_danger,omitempty"`
+		Behavioral   *BehavioralCond          `yaml:"behavioral,omitempty"`
 		And          []Condition              `yaml:"and,omitempty"`
 		Or           []Condition              `yaml:"or,omitempty"`
 		Not          *Condition               `yaml:"not,omitempty"`
@@ -129,6 +130,7 @@ func (c *Condition) UnmarshalYAML(value *yaml.Node) error {
 	c.DLP = alias.DLP
 	c.Evasion = alias.Evasion
 	c.VerbDanger = alias.VerbDanger
+	c.Behavioral = alias.Behavioral
 	c.And = alias.And
 	c.Or = alias.Or
 	c.Not = alias.Not
