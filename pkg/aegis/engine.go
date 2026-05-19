@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mayjain/aegis/internal/extract"
+	"github.com/mayjain/aegis/internal/policy"
 	"github.com/mayjain/aegis/pkg/aegis/allowlist"
 	"github.com/mayjain/aegis/pkg/aegis/bloom"
 	"github.com/mayjain/aegis/pkg/aegis/intent"
@@ -75,12 +76,13 @@ type intentClassifier = IntentClassifier
 
 // Engine is the V2 risk evaluation engine.
 type Engine struct {
-	fastPath  FastPath
-	evaluator RuleEvaluator
-	sigComp   SignalComputer
-	sessions  SessionStore
-	phase3    IntentClassifier
-	recorder  DecisionRecorder
+	fastPath   FastPath
+	evaluator  RuleEvaluator
+	sigComp    SignalComputer
+	sessions   SessionStore
+	phase3     IntentClassifier
+	recorder   DecisionRecorder
+	policyMode string
 	// bloom is kept for loadBenignCorpus access (WithBenignCorpus option).
 	bloom *bloom.Filter
 }
@@ -123,6 +125,14 @@ func WithAllowlistFromCWD(cwd string) Option {
 	}
 }
 
+// WithPolicyMode sets the policy evaluation mode (legacy|yaml|hybrid).
+// Default is legacy for zero-regression safety.
+func WithPolicyMode(mode string) Option {
+	return func(e *Engine) {
+		e.policyMode = mode
+	}
+}
+
 // NewEngine creates an Engine with Phase 1 static rules.
 func NewEngine(opts ...Option) (*Engine, error) {
 	db, err := loadCommandDB()
@@ -149,6 +159,29 @@ func NewEngine(opts ...Option) (*Engine, error) {
 	for _, opt := range opts {
 		opt(e)
 	}
+
+	// Wire PolicyEvaluator — policyMode from option overrides env var.
+	evalMode := policy.ModeFromEnv()
+	if e.policyMode != "" {
+		switch strings.ToLower(e.policyMode) {
+		case "yaml":
+			evalMode = policy.ModeYAML
+		case "hybrid":
+			evalMode = policy.ModeHybrid
+		default:
+			evalMode = policy.ModeLegacy
+		}
+	}
+
+	var yamlRules []policy.CompiledRule
+	if evalMode != policy.ModeLegacy {
+		yamlRules = loadYAMLRules()
+	}
+
+	if pe, err := policy.NewPolicyEvaluator(evalMode, yamlRules); err == nil {
+		e.evaluator = pe
+	}
+	// If PolicyEvaluator fails, fall back to existing staticRuleEvaluator (already set above).
 
 	if e.bloom.Len() == 0 {
 		for _, candidate := range defaultCorpusPaths() {
@@ -448,4 +481,34 @@ func loadCommandDB() (*extract.CommandDB, error) {
 		}
 	}
 	return nil, fmt.Errorf("command DB not found")
+}
+
+func loadYAMLRules() []policy.CompiledRule {
+	var allRules []policy.CompiledRule
+	patterns := []string{
+		"policies/phase1-deny.yaml",
+		"policies/phase1-allow.yaml",
+		"policies/phase1-escalate.yaml",
+		"../../policies/phase1-deny.yaml",
+		"../../policies/phase1-allow.yaml",
+		"../../policies/phase1-escalate.yaml",
+	}
+	seen := make(map[string]bool)
+	for _, p := range patterns {
+		base := filepath.Base(p)
+		if seen[base] {
+			continue
+		}
+		pf, err := policy.LoadFile(p)
+		if err != nil {
+			continue
+		}
+		seen[base] = true
+		compiled, err := policy.CompileFile(pf)
+		if err != nil {
+			continue
+		}
+		allRules = append(allRules, compiled...)
+	}
+	return allRules
 }
