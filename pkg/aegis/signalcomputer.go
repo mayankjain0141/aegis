@@ -17,10 +17,15 @@ type defaultSignalComputer struct {
 	fast     *extract.Extractor
 	full     *extract.Extractor
 	fastPath FastPath
+	scorer   *signals.MLScorer
 }
 
 func newDefaultSignalComputer(fast, full *extract.Extractor, fp FastPath) SignalComputer {
-	return &defaultSignalComputer{fast: fast, full: full, fastPath: fp}
+	return &defaultSignalComputer{fast: fast, full: full, fastPath: fp, scorer: mlScorer}
+}
+
+func newDefaultSignalComputerWithScorer(fast, full *extract.Extractor, fp FastPath, scorer *signals.MLScorer) SignalComputer {
+	return &defaultSignalComputer{fast: fast, full: full, fastPath: fp, scorer: scorer}
 }
 
 func (c *defaultSignalComputer) Compute(tool, argsJSON, cwd string) *signals.SignalBundle {
@@ -59,7 +64,7 @@ func (c *defaultSignalComputer) compute(tool, argsJSON, cwd string, ext *extract
 	if json.Unmarshal([]byte(argsJSON), &args) == nil {
 		for _, key := range []string{"command", "cmd", "script", "shell"} {
 			if cmdStr, ok := args[key].(string); ok && cmdStr != "" {
-				bundle.MLScore = mlScorer.Score(cmdStr)
+				bundle.MLScore = c.scorer.Score(cmdStr)
 				break
 			}
 		}

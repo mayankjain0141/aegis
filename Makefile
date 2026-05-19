@@ -1,4 +1,4 @@
-.PHONY: build install test smoke test-attacks bench lint fmt ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs
+.PHONY: build install test smoke test-attacks bench lint fmt ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs ml-test ml-train
 
 build:
 	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
@@ -63,6 +63,22 @@ down:
 
 logs:
 	docker compose logs -f
+
+# ── ML Model ─────────────────────────────────────────────────────────────────
+
+# Run ML scorer unit tests (heuristic + leaves inference path).
+ml-test:
+	go test ./pkg/aegis/signals/... -run TestMLScore -v -count=1
+
+# Train a LightGBM model from the eval corpus and save to policies/data/ml_score.model.
+# Requires: pip install lightgbm scikit-learn
+# Usage: make ml-train   (produces policies/data/ml_score.model)
+ml-train:
+	@mkdir -p policies/data
+	python3 python/train_ml_score.py \
+		--attacks testdata/eval/attacks.jsonl \
+		--benign  testdata/eval/benign.jsonl \
+		--out     policies/data/ml_score.model
 
 # ── Quality ───────────────────────────────────────────────────────────────────
 

