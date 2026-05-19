@@ -12,13 +12,13 @@ rules:
     tags: [filesystem, destruction]
     condition:
       or:
+        - verb_danger:
+            dd:
+              gt: 0
         - and:
             - any_verb: [rm, mkfs, dd, fdisk, shred]
             - path:
                 has_critical: true
-        - verb_danger:
-            dd:
-              gt: 0
 
   - name: system_control
     priority: 11
@@ -31,8 +31,9 @@ rules:
     remediation: "System lifecycle operations are not permitted through the AI assistant."
     tags: [system, privilege]
     condition:
-      any_verb: [shutdown, reboot, halt, poweroff]
-      tool_category: shell
+      and:
+        - any_verb: [shutdown, reboot, halt, poweroff]
+        - tool_category: shell
 
   - name: raw_socket_open
     priority: 12
@@ -60,10 +61,27 @@ rules:
     remediation: "Do not attempt to escalate privileges or modify system authentication."
     tags: [privilege, escalation]
     condition:
-      expr: >
-        anyVerb(b, "passwd", "chpasswd", "visudo") ||
-        (b.Evasion.WrappersStripped > 0 && hasShellOrDangerVerb(b)) ||
-        hasSudoShellInvocation(b)
+      or:
+        - any_verb: [passwd, chpasswd, visudo]
+        - and:
+            - expr: "wrappers_stripped > 0"
+            - expr: >
+                any(commands, {.binary == "bash" || .binary == "sh" || .binary == "zsh" ||
+                  .binary == "fish" || .binary == "dash" || .binary == "python" ||
+                  .binary == "python3" || .binary == "node" || .binary == "nodejs" ||
+                  .binary == "perl" || .binary == "ruby" || .binary == "php" ||
+                  .binary == "lua" || .binary == "awk" || .binary == "rm" ||
+                  .binary == "mkfs" || .binary == "dd" || .binary == "fdisk" ||
+                  .binary == "nc" || .binary == "ncat" || .binary == "socat" ||
+                  .binary == "wget" || .binary == "curl"})
+        - expr: >
+            any(commands, {
+              (.binary == "sudo" || .binary == "su" || .binary == "doas" || .binary == "pkexec") &&
+              any(.args, {# == "bash" || # == "sh" || # == "zsh" || # == "fish" ||
+                # == "dash" || # == "python" || # == "python3" || # == "node" ||
+                # == "nodejs" || # == "perl" || # == "ruby" || # == "php" ||
+                # == "lua" || # == "awk" || # == "-" || # == "-s" || # == "--shell"})
+            })
 
   - name: critical_path_write
     priority: 14
@@ -76,27 +94,17 @@ rules:
     remediation: "Restrict writes to within the project directory. Do not modify system files."
     tags: [filesystem, write, privilege]
     condition:
-      or:
-        - and:
+      and:
+        - or:
             - tool_category: file_write
+            - tool_category: file_delete
+        - or:
             - path:
                 has_critical: true
-                all_in_project: false
-        - and:
-            - tool_category: file_write
             - path:
                 has_sensitive: true
-                all_in_project: false
-        - and:
-            - tool_category: file_delete
-            - path:
-                has_critical: true
-                all_in_project: false
-        - and:
-            - tool_category: file_delete
-            - path:
-                has_sensitive: true
-                all_in_project: false
+        - path:
+            all_in_project: false
 
   - name: secret_leakage
     priority: 15
@@ -126,9 +134,19 @@ rules:
     remediation: "Do not read sensitive system files such as password databases or private keys."
     tags: [filesystem, secrets, sensitive]
     condition:
-      expr: >
-        (hasSensitivePath(b) && (b.ToolClass.Category == "file_read" || b.ToolClass.Category == "shell")) ||
-        (b.Path.HasCritical && !b.Path.AllInProject && b.ToolClass.Category == "file_read")
+      or:
+        - and:
+            - path:
+                has_sensitive: true
+            - or:
+                - tool_category: file_read
+                - tool_category: shell
+        - and:
+            - path:
+                has_critical: true
+            - path:
+                all_in_project: false
+            - tool_category: file_read
 
   - name: data_exfiltration
     priority: 17
@@ -164,9 +182,10 @@ rules:
     remediation: "Do not use encoded payloads in shell commands."
     tags: [evasion, rce, shell]
     condition:
-      evasion:
-        encoding_detected: true
-      tool_category: shell
+      and:
+        - evasion:
+            encoding_detected: true
+        - tool_category: shell
 
   - name: suid_manipulation
     priority: 19
@@ -179,7 +198,12 @@ rules:
     remediation: "Do not set SUID/SGID bits on executables."
     tags: [filesystem, privilege, suid]
     condition:
-      expr: isSuidChmod(b)
+      expr: >
+        any(commands, {
+          .binary == "chmod" &&
+          any(.args, {# == "+s" || # == "u+s" || # == "g+s" ||
+            (len(#) == 4 && # startsWith "4") || Contains(#, "+s")})
+        })
 
   - name: cron_persistence
     priority: 20
@@ -193,7 +217,17 @@ rules:
     remediation: "Do not modify cron jobs or cron directories."
     tags: [persistence, cron]
     condition:
-      expr: isCronPersistence(b)
+      or:
+        - expr: >
+            any(commands, {
+              .binary == "crontab" && any(.args, {# == "-e" || # == "-r"})
+            })
+        - expr: >
+            any(commands, {
+              .binary == "crontab" && (len(.args) == 0 || (len(.args) > 0 && !(.args[0] startsWith "-")))
+            })
+        - expr: >
+            any(paths, {HasPrefix(#, "/etc/cron") || HasPrefix(#, "/var/spool/cron") || HasPrefix(#, "/etc/crontab")})
 
   - name: bashrc_persistence
     priority: 21
@@ -207,7 +241,16 @@ rules:
     remediation: "Do not write to shell startup files with network or obfuscated content."
     tags: [persistence, shell, startup]
     condition:
-      expr: writesRCWithExec(b)
+      and:
+        - expr: >
+            any(paths, {
+              HasSuffix(#, ".bashrc") || HasSuffix(#, ".profile") || HasSuffix(#, ".zshrc") ||
+              HasSuffix(#, ".bash_profile") || HasSuffix(#, ".zprofile") || HasSuffix(#, ".fish")
+            })
+        - or:
+            - expr: "network_score > 0.1"
+            - evasion:
+                encoding_detected: true
 
   - name: execute_from_tmp
     priority: 22
@@ -221,4 +264,18 @@ rules:
     remediation: "Do not download and execute scripts from /tmp. Use the project directory."
     tags: [shell, tmp, rce]
     condition:
-      expr: executesFromTmp(b)
+      and:
+        - tool_category: shell
+        - or:
+            - expr: >
+                any(commands, {HasPrefix(.full_path, "/tmp/") || HasPrefix(.full_path, "/var/tmp/")})
+            - expr: >
+                any(commands, {
+                  (.binary == "bash" || .binary == "sh" || .binary == "zsh" ||
+                   .binary == "fish" || .binary == "dash" || .binary == "python" ||
+                   .binary == "python3" || .binary == "node" || .binary == "nodejs" ||
+                   .binary == "perl" || .binary == "ruby" || .binary == "php" ||
+                   .binary == "lua" || .binary == "awk") &&
+                  len(.args) > 0 && .args[0] != "-c" &&
+                  (HasPrefix(.args[0], "/tmp/") || HasPrefix(.args[0], "/var/tmp/"))
+                })
