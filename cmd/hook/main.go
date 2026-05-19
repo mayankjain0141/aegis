@@ -76,7 +76,7 @@ type daemonResponse struct {
 	Confidence     float64  `json:"confidence"`
 	Evidence       []string `json:"evidence"`
 	CompositeScore float64  `json:"composite_score"`
-	Phase          int      `json:"phase"`
+	Stage          string   `json:"stage"`
 }
 
 var wal *telemetry.WAL // opened once per process, nil if unavailable
@@ -205,7 +205,7 @@ func tryDaemon(req *normalizedRequest) *aegis.Decision {
 		Confidence:     dr.Confidence,
 		Evidence:       dr.Evidence,
 		CompositeScore: dr.CompositeScore,
-		Phase:          dr.Phase,
+		Stage:          aegis.EvaluationStage(dr.Stage),
 	}
 }
 
@@ -255,7 +255,7 @@ func writeWAL(req *normalizedRequest, d *aegis.Decision, latencyUs int64) {
 		Severity:       d.Severity,
 		Confidence:     d.Confidence,
 		CompositeScore: d.CompositeScore,
-		Phase:          d.Phase,
+		Stage:          string(d.Stage),
 		LatencyUs:      latencyUs,
 	})
 }

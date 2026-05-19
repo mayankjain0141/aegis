@@ -1,6 +1,6 @@
 package aegis
 
-// Tests for applyPhase3Rules — in package aegis to access the unexported function.
+// Tests for classifyIntent — in package aegis to access the unexported function.
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 	"github.com/mayjain/aegis/pkg/aegis/intent"
 )
 
-func TestApplyPhase3Rules(t *testing.T) {
+func TestClassifyIntent(t *testing.T) {
 	cases := []struct {
 		name       string
 		intent_    string
@@ -66,7 +66,7 @@ func TestApplyPhase3Rules(t *testing.T) {
 				Confidence: tc.confidence,
 				Reasoning:  "test",
 			}
-			d := applyPhase3Rules(sig, 0.5)
+			d := classifyIntent(sig, 0.5)
 			if d.Action != tc.wantAction {
 				t.Errorf("action: want %v, got %v", tc.wantAction, d.Action)
 			}
@@ -76,17 +76,17 @@ func TestApplyPhase3Rules(t *testing.T) {
 			if d.Confidence != tc.wantConf {
 				t.Errorf("confidence: want %.2f, got %.2f", tc.wantConf, d.Confidence)
 			}
-			if d.Phase != 3 {
-				t.Errorf("phase: want 3, got %d", d.Phase)
+			if d.Stage != StageIntentLLM {
+				t.Errorf("stage: want %s, got %s", StageIntentLLM, d.Stage)
 			}
 		})
 	}
 }
 
-func TestApplyPhase3Rules_CompositeScorePreserved(t *testing.T) {
+func TestClassifyIntent_CompositeScorePreserved(t *testing.T) {
 	sig := &intent.IntentSignal{Intent: "malicious", Confidence: 0.95}
 	composite := 0.87
-	d := applyPhase3Rules(sig, composite)
+	d := classifyIntent(sig, composite)
 	if d.CompositeScore != composite {
 		t.Errorf("CompositeScore: want %.2f, got %.2f", composite, d.CompositeScore)
 	}

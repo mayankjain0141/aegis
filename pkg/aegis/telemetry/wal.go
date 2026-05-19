@@ -22,7 +22,7 @@ type Event struct {
 	Severity       string    `json:"severity,omitempty"`
 	Confidence     float64   `json:"confidence"`
 	CompositeScore float64   `json:"composite_score"`
-	Phase          int       `json:"phase"`
+	Stage          string    `json:"stage"`
 	LatencyUs      int64     `json:"latency_us"`
 }
 

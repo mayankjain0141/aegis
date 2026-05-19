@@ -26,7 +26,7 @@ class Decision:
     confidence: float = 0.0
     evidence: list[str] = field(default_factory=list)
     composite_score: float = 0.0
-    phase: int = 1
+    stage: str = "static_rules"
 
     @property
     def allowed(self) -> bool:

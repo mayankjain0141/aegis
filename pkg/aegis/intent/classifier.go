@@ -6,7 +6,6 @@ package intent
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -69,15 +68,13 @@ func New(model, apiKeyEnv string, maxCallsPerMin int) (*Classifier, error) {
 		}
 		baseURL := os.Getenv("LITELLM_BASE_URL")
 		if baseURL == "" {
-			baseURL = "https://your-llm-proxy.example.com/v1"
+			return nil, fmt.Errorf("LITELLM_BASE_URL not set; required when using LITELLM_API_KEY")
 		}
 		if model == "" {
 			model = "anthropic/claude-sonnet-4-6"
 		}
-		// 
-		transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
 		c := &Classifier{
-			client:  &http.Client{Timeout: 12 * time.Second, Transport: transport},
+			client:  &http.Client{Timeout: 12 * time.Second},
 			model:   model,
 			apiKey:  key,
 			baseURL: baseURL,

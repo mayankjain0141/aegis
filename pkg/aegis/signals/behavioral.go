@@ -44,6 +44,7 @@ func ComputeBehavioral(
 	lastDenyVerb string,
 	baselineDeviation float64,
 	riskTrend float64,
+	now time.Time,
 ) BehavioralSignal {
 	sig := BehavioralSignal{
 		EscalationGradient: riskTrend,
@@ -66,7 +67,7 @@ func ComputeBehavioral(
 	}
 
 	// Sequence matching
-	sig.SequenceRisk, sig.SequenceName = matchSequences(current, history)
+	sig.SequenceRisk, sig.SequenceName = matchSequences(current, history, now)
 
 	// Composite behavioral score
 	score := 0.0
@@ -117,12 +118,25 @@ func equivalentVerb(a, b string) bool {
 	return false
 }
 
-func matchSequences(current *SignalBundle, history []SessionHistoryEntry) (float64, string) {
+func matchSequences(current *SignalBundle, history []SessionHistoryEntry, now time.Time) (float64, string) {
 	// exfil_after_sensitive_read: sensitive file read in last 30s, now network write
 	if current.Network.HasDataFlag || current.Network.Score > 0.5 {
-		cutoff := time.Now().Add(-30 * time.Second)
-		for _, h := range history {
+		cutoff := now.Add(-30 * time.Second)
+		lastSensitiveIdx := -1
+		for i, h := range history {
 			if h.Time.After(cutoff) && h.PathSensitive {
+				lastSensitiveIdx = i
+			}
+		}
+		if lastSensitiveIdx >= 0 {
+			noInterveningNetworkWrite := true
+			for i := lastSensitiveIdx + 1; i < len(history); i++ {
+				if history[i].Time.After(cutoff) && history[i].NetworkWrite {
+					noInterveningNetworkWrite = false
+					break
+				}
+			}
+			if noInterveningNetworkWrite {
 				return 0.90, "exfil_after_sensitive_read"
 			}
 		}
@@ -130,7 +144,7 @@ func matchSequences(current *SignalBundle, history []SessionHistoryEntry) (float
 
 	// escalating_access: 3+ critical path accesses in 2 minutes
 	if current.Path.HasCritical {
-		cutoff := time.Now().Add(-2 * time.Minute)
+		cutoff := now.Add(-2 * time.Minute)
 		critCount := 0
 		for _, h := range history {
 			if h.Time.After(cutoff) && h.PathCritical {
@@ -144,20 +158,23 @@ func matchSequences(current *SignalBundle, history []SessionHistoryEntry) (float
 
 	// encoded_exfil: sensitive read → base64 → network
 	if current.Network.HasDataFlag {
-		cutoff := time.Now().Add(-60 * time.Second)
-		hasSensitiveRead := false
-		hasBase64 := false
-		for _, h := range history {
-			if h.Time.After(cutoff) {
-				if h.PathSensitive {
-					hasSensitiveRead = true
-				}
+		cutoff := now.Add(-60 * time.Second)
+		sensitiveReadIdx := -1
+		base64Idx := -1
+		for i, h := range history {
+			if !h.Time.After(cutoff) {
+				continue
+			}
+			if sensitiveReadIdx < 0 && h.PathSensitive {
+				sensitiveReadIdx = i
+			}
+			if sensitiveReadIdx >= 0 && base64Idx < 0 && i > sensitiveReadIdx {
 				if strings.Contains(h.ArgSummary, "base64") || strings.Contains(h.ArgSummary, "xxd") {
-					hasBase64 = true
+					base64Idx = i
 				}
 			}
 		}
-		if hasSensitiveRead && hasBase64 {
+		if sensitiveReadIdx >= 0 && base64Idx >= 0 {
 			return 0.85, "encoded_exfil"
 		}
 	}

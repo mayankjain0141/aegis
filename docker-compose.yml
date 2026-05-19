@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: aegis
       POSTGRES_USER: aegis
-      POSTGRES_PASSWORD: aegis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegis}
     ports:
       - "5432:5432"
     healthcheck:
@@ -21,7 +21,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      AEGIS_PG_URL: "postgres://aegis:aegis@postgres:5432/aegis?sslmode=disable"
+      AEGIS_PG_URL: "postgres://aegis:${POSTGRES_PASSWORD:-aegis}@postgres:5432/aegis?sslmode=disable"
     volumes:
       - /tmp/aegis.sock:/tmp/aegis.sock
     ports:

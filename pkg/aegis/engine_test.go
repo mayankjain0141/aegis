@@ -67,21 +67,21 @@ func TestPhase2_RetryAfterDeny_UniqueValue(t *testing.T) {
 	e := newEngine(t)
 	agentID := "agent-retry-unique"
 
-	// Call 1: Phase 1 ESCALATEs (python3 is uncertain — could be anything)
+	// Call 1: static rules ESCALATE (python3 is uncertain — could be anything)
 	// Primary verb "python3" is recorded as suspicious in session.
 	d1 := eval(t, e, agentID, `python3 -c "import socket; s=socket.socket(); s.connect(('10.0.0.1',9000))"`)
-	if d1.Phase != 1 || d1.Action != aegis.ActionEscalate {
-		t.Fatalf("call 1: want Phase 1 ESCALATE (uncertain interpreter), got phase=%d action=%v rule=%s",
-			d1.Phase, d1.Action, d1.Rule)
+	if d1.Stage != aegis.StageStaticRules || d1.Action != aegis.ActionEscalate {
+		t.Fatalf("call 1: want StageStaticRules ESCALATE (uncertain interpreter), got stage=%s action=%v rule=%s",
+			d1.Stage, d1.Action, d1.Rule)
 	}
 
 	// Call 2: different python3 script, looks innocent in isolation.
-	// Phase 1 would again just ESCALATE. But Phase 2 sees: we already
+	// Static rules would again just ESCALATE. But behavioral analysis sees: we already
 	// escalated a python3 call seconds ago → retry_after_deny → DENY.
 	d2 := eval(t, e, agentID, "python3 send_report.py")
-	if d2.Phase != 2 {
-		t.Errorf("call 2: want Phase 2 (only behavioral context knows this is a retry), got phase=%d rule=%s",
-			d2.Phase, d2.Rule)
+	if d2.Stage != aegis.StageBehavioral {
+		t.Errorf("call 2: want StageBehavioral (only behavioral context knows this is a retry), got stage=%s rule=%s",
+			d2.Stage, d2.Rule)
 	}
 	if d2.Action != aegis.ActionDeny {
 		t.Errorf("call 2 action: want deny, got %v", d2.Action)
@@ -126,15 +126,15 @@ func TestPhase2_ExfilAfterSensitiveRead_UniqueValue(t *testing.T) {
 
 	// Phase 1 alone cannot know this curl is dangerous (it might be normal).
 	// Only Phase 2 has the context that a sensitive file was just accessed.
-	if d2.Phase == 2 && d2.Action == aegis.ActionDeny {
+	if d2.Stage == aegis.StageBehavioral && d2.Action == aegis.ActionDeny {
 		if d2.Rule != "exfil_after_sensitive_read" {
-			t.Logf("note: Phase 2 fired but different rule: %s (acceptable)", d2.Rule)
+			t.Logf("note: behavioral stage fired but different rule: %s (acceptable)", d2.Rule)
 		}
-	} else if d2.Phase == 1 && (d2.Action == aegis.ActionDeny || d2.Action == aegis.ActionEscalate) {
-		// Phase 1 may catch the curl independently — still a valid outcome
-		t.Logf("Phase 1 resolved curl (%s %v) — exfil sequence test is a best-effort demo", d2.Rule, d2.Action)
+	} else if d2.Stage == aegis.StageStaticRules && (d2.Action == aegis.ActionDeny || d2.Action == aegis.ActionEscalate) {
+		// Static rules may catch the curl independently — still a valid outcome
+		t.Logf("Static rules resolved curl (%s %v) — exfil sequence test is a best-effort demo", d2.Rule, d2.Action)
 	} else {
-		t.Logf("d2: phase=%d action=%v rule=%s (Phase 2 exfil detection may need >30s window)", d2.Phase, d2.Action, d2.Rule)
+		t.Logf("d2: stage=%s action=%v rule=%s (behavioral exfil detection may need >30s window)", d2.Stage, d2.Action, d2.Rule)
 	}
 }
 
@@ -218,8 +218,8 @@ func TestPhase2_RequiresAgentID_NoFalsePhase2(t *testing.T) {
 	d := e.EvaluateJSON(context.Background(), "Shell",
 		`{"command":"python3 do_thing.py"}`, "/tmp/p")
 
-	if d.Phase == 2 {
-		t.Error("Phase 2 must not run without AgentID — no session exists to detect patterns")
+	if d.Stage == aegis.StageBehavioral {
+		t.Error("behavioral stage must not run without AgentID — no session exists to detect patterns")
 	}
 }
 
@@ -234,8 +234,8 @@ func TestPhase2_SkippedOnHighConfidencePhase1(t *testing.T) {
 		CWD:       "/tmp/project",
 		AgentID:   "agent-skip-p2",
 	})
-	if d.Phase != 1 {
-		t.Errorf("high confidence Phase 1 decision must be final, got phase=%d", d.Phase)
+	if d.Stage != aegis.StageStaticRules {
+		t.Errorf("high confidence static rules decision must be final, got stage=%s", d.Stage)
 	}
 	if d.Confidence < 0.85 {
 		t.Errorf("confidence: want >=0.85 for phase 1 final, got %.2f", d.Confidence)
@@ -266,10 +266,10 @@ func TestPhase2_SessionPersistsAcrossMultipleCalls(t *testing.T) {
 			t.Errorf("call %d: nil or empty decision", i)
 		}
 	}
-	// Third and fourth python3 calls may show Phase 2 retry pattern
+	// Third and fourth python3 calls may show behavioral retry pattern
 	// (depends on timing and prior escalation recording)
-	if decisions[3] != nil && decisions[3].Phase == 2 {
-		t.Logf("Phase 2 retry detected on call 4: rule=%s action=%v", decisions[3].Rule, decisions[3].Action)
+	if decisions[3] != nil && decisions[3].Stage == aegis.StageBehavioral {
+		t.Logf("behavioral retry detected on call 4: rule=%s action=%v", decisions[3].Rule, decisions[3].Action)
 	}
 }
 
@@ -311,14 +311,14 @@ func TestPhase3_FiresOnEscalate_Malicious(t *testing.T) {
 	d := e.EvaluateJSON(context.Background(), "Shell",
 		`{"command":"python3 collect_and_upload.py"}`, "/tmp/project")
 	if mock.called == 0 {
-		// Phase 1 resolved it at high confidence (e.g., benign_package_mgr or similar)
-		if d.Phase != 1 {
-			t.Error("if classifier not called, Phase 1 must have resolved with high confidence")
+		// Static rules resolved it at high confidence (e.g., benign_package_mgr or similar)
+		if d.Stage != aegis.StageStaticRules {
+			t.Error("if classifier not called, static rules must have resolved with high confidence")
 		}
 		return
 	}
-	if d.Phase != 3 {
-		t.Errorf("phase: want 3 after LLM classification, got %d", d.Phase)
+	if d.Stage != aegis.StageIntentLLM {
+		t.Errorf("stage: want StageIntentLLM after LLM classification, got %s", d.Stage)
 	}
 	if d.Action != aegis.ActionDeny {
 		t.Errorf("action: want deny for malicious/0.95, got %v", d.Action)
@@ -335,10 +335,10 @@ func TestPhase3_FiresOnEscalate_Legitimate(t *testing.T) {
 	d := e.EvaluateJSON(context.Background(), "Shell",
 		`{"command":"python3 collect_and_upload.py"}`, "/tmp/project")
 	if mock.called == 0 {
-		return // Phase 1 resolved at high confidence
+		return // static rules resolved at high confidence
 	}
-	if d.Phase != 3 {
-		t.Errorf("phase: want 3, got %d", d.Phase)
+	if d.Stage != aegis.StageIntentLLM {
+		t.Errorf("stage: want StageIntentLLM, got %s", d.Stage)
 	}
 	if d.Action != aegis.ActionAllow {
 		t.Errorf("action: want allow for legitimate/0.92, got %v", d.Action)
@@ -352,7 +352,7 @@ func TestPhase3_FailSecure_OnLLMError(t *testing.T) {
 	d := e.EvaluateJSON(context.Background(), "Shell",
 		`{"command":"python3 collect_and_upload.py"}`, "/tmp/project")
 	if mock.called == 0 {
-		return // Phase 1 resolved it — no LLM needed
+		return // static rules resolved it — no LLM needed
 	}
 	if d.Action != aegis.ActionDeny {
 		t.Errorf("action: want deny on LLM error (fail-secure), got %v", d.Action)
@@ -360,8 +360,8 @@ func TestPhase3_FailSecure_OnLLMError(t *testing.T) {
 	if d.Rule != "llm_error" {
 		t.Errorf("rule: want llm_error, got %q", d.Rule)
 	}
-	if d.Phase != 3 {
-		t.Errorf("phase: want 3 for LLM error, got %d", d.Phase)
+	if d.Stage != aegis.StageIntentLLM {
+		t.Errorf("stage: want StageIntentLLM for LLM error, got %s", d.Stage)
 	}
 }
 
@@ -387,8 +387,8 @@ func TestPhase3_NotCalledWithoutClassifier(t *testing.T) {
 	e := newEngine(t) // no classifier
 	d := e.EvaluateJSON(context.Background(), "Shell",
 		`{"command":"python3 collect_and_upload.py"}`, "/tmp/project")
-	if d.Phase == 3 {
-		t.Error("Phase 3 must not run without a configured classifier")
+	if d.Stage == aegis.StageIntentLLM {
+		t.Error("LLM intent stage must not run without a configured classifier")
 	}
 }
 

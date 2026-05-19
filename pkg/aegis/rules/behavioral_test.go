@@ -7,19 +7,19 @@ import (
 )
 
 func p2bundle(p2 signals.BehavioralSignal) BehavioralBundle {
-	return BehavioralBundle{Phase1: &signals.SignalBundle{}, Phase2: p2}
+	return BehavioralBundle{Signals: &signals.SignalBundle{}, Behavior: p2}
 }
 
 func p2bundleWithPhase1Network(p2 signals.BehavioralSignal, networkScore float64) BehavioralBundle {
 	b := &signals.SignalBundle{}
 	b.Network.Score = networkScore
-	return BehavioralBundle{Phase1: b, Phase2: p2}
+	return BehavioralBundle{Signals: b, Behavior: p2}
 }
 
 func p2bundleWithPhase1Critical(p2 signals.BehavioralSignal) BehavioralBundle {
 	b := &signals.SignalBundle{}
 	b.Path.HasCritical = true
-	return BehavioralBundle{Phase1: b, Phase2: p2}
+	return BehavioralBundle{Signals: b, Behavior: p2}
 }
 
 // ── Individual rule tests ─────────────────────────────────────────────────

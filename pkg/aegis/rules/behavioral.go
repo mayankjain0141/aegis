@@ -4,32 +4,17 @@ import (
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
 
-// BehavioralBundle pairs Phase 1 signals with Phase 2 behavioral signal.
+// BehavioralBundle pairs static signals with behavioral signal.
 type BehavioralBundle struct {
-	Phase1 *signals.SignalBundle
-	Phase2 signals.BehavioralSignal
+	Signals  *signals.SignalBundle
+	Behavior signals.BehavioralSignal
 }
 
-// Phase2Rules returns the behavioral Phase 2 rule set.
-// These rules run when Phase 1 confidence is below the threshold.
-func Phase2Rules() []Rule {
-	return []Rule{
-		{
-			Name:       "retry_after_deny",
-			Priority:   200,
-			Action:     ActionDeny,
-			Severity:   "high",
-			Confidence: 0.92,
-			Condition:  func(b *signals.SignalBundle) bool { return false }, // unused; Phase2 uses BehavioralEvaluate
-		},
-	}
-}
-
-// BehavioralEvaluate evaluates Phase 2 behavioral rules.
+// BehavioralEvaluate evaluates behavioral rules.
 // Returns a decision and true if a rule fired, or zero and false.
 func BehavioralEvaluate(bundle BehavioralBundle) (Rule, bool) {
-	b2 := bundle.Phase2
-	b1 := bundle.Phase1
+	b2 := bundle.Behavior
+	b1 := bundle.Signals
 
 	// Priority 200: retry after deny
 	if b2.RetryAfterDeny {
@@ -83,6 +68,17 @@ func BehavioralEvaluate(bundle BehavioralBundle) (Rule, bool) {
 			Action:     ActionEscalate,
 			Severity:   "medium",
 			Confidence: 0.70,
+		}, true
+	}
+
+	// Priority 205: ML high-danger signal combined with evasion
+	if b1.MLScore > 0.8 && b1.Evasion.Score > 0.2 {
+		return Rule{
+			Name:       "ml_high_danger_evasion",
+			Priority:   205,
+			Action:     ActionDeny,
+			Severity:   "high",
+			Confidence: 0.85,
 		}, true
 	}
 

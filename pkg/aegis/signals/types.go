@@ -8,17 +8,19 @@ type SignalBundle struct {
 	Network   NetworkSignal
 	DLP       DLPSignal
 	Evasion   EvasionSignal
+	MLScore   float64
 }
 
 // CompositeScore computes a weighted score for observability only.
 // This number is NOT used for decisions — only for dashboards.
 func CompositeScore(b *SignalBundle) float64 {
 	score := b.ToolClass.Score*0.15 +
-		b.Command.MaxVerbDanger*0.25 +
-		b.Path.MaxPathRisk*0.25 +
+		b.Command.MaxVerbDanger*0.20 +
+		b.Path.MaxPathRisk*0.20 +
 		b.Network.Score*0.15 +
 		b.DLP.Score*0.10 +
-		b.Evasion.Score*0.10
+		b.Evasion.Score*0.10 +
+		b.MLScore*0.10
 	if score > 1.0 {
 		return 1.0
 	}

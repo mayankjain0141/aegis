@@ -23,6 +23,19 @@ import (
 	"github.com/mayjain/aegis/pkg/aegis/signals"
 )
 
+// mlScorer is the package-level heuristic ML scorer for command maliciousness.
+var mlScorer = signals.NewMLScorer("")
+
+// EvaluationStage identifies which layer of the evaluation cascade produced a Decision.
+type EvaluationStage string
+
+const (
+	StageFastPath    EvaluationStage = "fast_path"    // bloom filter / allowlist short-circuit
+	StageStaticRules EvaluationStage = "static_rules" // YAML-compiled rule engine
+	StageBehavioral  EvaluationStage = "behavioral"   // session history analysis
+	StageIntentLLM   EvaluationStage = "intent_llm"   // LLM intent classifier
+)
+
 // Action mirrors rules.Action for the public API.
 type Action = rules.Action
 
@@ -43,21 +56,21 @@ type Request struct {
 
 // Decision is the evaluation result.
 type Decision struct {
-	Action         Action   `json:"action"`
-	Rule           string   `json:"rule"`
-	Severity       string   `json:"severity,omitempty"`
-	Confidence     float64  `json:"confidence"`
-	Evidence       []string `json:"evidence,omitempty"`
-	CompositeScore float64  `json:"composite_score"`
-	Phase          int      `json:"phase"` // 0=fast_path, 1=static, 2=behavioral
+	Action         Action          `json:"action"`
+	Rule           string          `json:"rule"`
+	Severity       string          `json:"severity,omitempty"`
+	Confidence     float64         `json:"confidence"`
+	Evidence       []string        `json:"evidence,omitempty"`
+	CompositeScore float64         `json:"composite_score"`
+	Stage          EvaluationStage `json:"stage"`
 }
 
 // Engine is the V2 risk evaluation engine.
 type Engine struct {
 	rules            []rules.Rule
 	bloom            *bloom.Filter
-	extractor        *extract.Extractor // fast (AST-only) for Phase 1
-	fullExtractor    *extract.Extractor // full (with dry-run) for Phase 2
+	extractor        *extract.Extractor // fast (AST-only) for static rules
+	fullExtractor    *extract.Extractor // full (with dry-run) for behavioral analysis
 	sessions         map[string]*session.State
 	sessionMu        sync.Mutex
 	intentClassifier intentClassifier
@@ -139,78 +152,79 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	// Fast path: bloom filter exact match
 	key := bloom.CanonicalKey(req.Tool, req.Arguments)
 	if e.bloom.Contains(key) {
-		d := &Decision{Action: ActionAllow, Rule: "fast_path_allow", Confidence: 1.00, Phase: 0}
+		d := &Decision{Action: ActionAllow, Rule: "fast_path_allow", Confidence: 1.00, Stage: StageFastPath}
 		e.recordCall(req, d, 0.0)
 		return d
 	}
 
 	// Allowlist fast path: check project/user allowlist before rule evaluation
 	if allow, rule := e.checkAllowlist(req, argsJSON); allow {
-		d := &Decision{Action: ActionAllow, Rule: rule, Confidence: 1.00, Phase: 0}
+		d := &Decision{Action: ActionAllow, Rule: rule, Confidence: 1.00, Stage: StageFastPath}
 		e.recordCall(req, d, 0.0)
 		return d
 	}
 
-	// Phase 1: static rule engine
+	// Static rule engine
 	bundle := e.computeSignals(req.Tool, argsJSON, req.CWD)
 	composite := signals.CompositeScore(bundle)
 
 	rule, matched := rules.Evaluate(e.rules, bundle)
-	var d1 *Decision
+	var staticDecision *Decision
 	if !matched {
-		d1 = &Decision{Action: ActionDeny, Rule: "no_rule_matched", Severity: "medium", Confidence: 0.50, CompositeScore: composite, Phase: 1}
+		staticDecision = &Decision{Action: ActionDeny, Rule: "no_rule_matched", Severity: "medium", Confidence: 0.50, CompositeScore: composite, Stage: StageStaticRules}
 	} else {
-		d1 = &Decision{Action: rule.Action, Rule: rule.Name, Severity: rule.Severity, Confidence: rule.Confidence, Evidence: buildEvidence(bundle), CompositeScore: composite, Phase: 1}
+		staticDecision = &Decision{Action: rule.Action, Rule: rule.Name, Severity: rule.Severity, Confidence: rule.Confidence, Evidence: buildEvidence(bundle), CompositeScore: composite, Stage: StageStaticRules}
 	}
 
-	// High-confidence Phase 1 decisions are final
-	if d1.Confidence >= 0.85 {
-		e.recordCall(req, d1, composite)
-		return d1
+	// High-confidence static rule decisions are final
+	if staticDecision.Confidence >= 0.85 {
+		e.recordCall(req, staticDecision, composite)
+		return staticDecision
 	}
 
-	// Phase 2: behavioral analysis for low-confidence decisions
-	var d2 *Decision
-	var d2matched bool
+	// Behavioral analysis for low-confidence decisions
+	var behavioralDecision *Decision
+	var behavioralMatched bool
 	sess := e.getOrCreateSession(req.AgentID)
 	if sess != nil {
 		// Recompute with full extractor for better signal quality
 		bundle = e.computeSignalsFull(req.Tool, argsJSON, req.CWD)
 		composite = signals.CompositeScore(bundle)
 
-		sig := sess.Signal(session.ToolCall{Time: time.Now(), Tool: req.Tool})
+		sessionSig := sess.Signal(session.ToolCall{Time: time.Now(), Tool: req.Tool})
 		history := toHistoryEntries(sess.RecentCalls(20), bundle)
 		primaryVerb := ""
 		if len(bundle.Command.Verbs) > 0 {
 			primaryVerb = bundle.Command.Verbs[0]
 		}
-		b2 := signals.ComputeBehavioral(
+		behavioralSig := signals.ComputeBehavioral(
 			bundle, primaryVerb, history,
-			sig.CallsLastMinute,
-			sig.LastDenyTimeAgo, sig.LastDenyVerb, // LastDenyVerb enables RetryAfterDeny
-			sig.BaselineDeviation,
-			sig.RiskTrend,
+			sessionSig.CallsLastMinute,
+			sessionSig.LastDenyTimeAgo, sessionSig.LastDenyVerb, // LastDenyVerb enables RetryAfterDeny
+			sessionSig.BaselineDeviation,
+			sessionSig.RiskTrend,
+			time.Now(),
 		)
-		b2.BaselineEstablished = sig.BaselineEstablished
-		bBundle := rules.BehavioralBundle{Phase1: bundle, Phase2: b2}
-		if p2rule, p2matched2 := rules.BehavioralEvaluate(bBundle); p2matched2 {
-			d2matched = true
-			d2 = &Decision{
+		behavioralSig.BaselineEstablished = sessionSig.BaselineEstablished
+		behavioralBundle := rules.BehavioralBundle{Signals: bundle, Behavior: behavioralSig}
+		if p2rule, p2matched2 := rules.BehavioralEvaluate(behavioralBundle); p2matched2 {
+			behavioralMatched = true
+			behavioralDecision = &Decision{
 				Action:         p2rule.Action,
 				Rule:           p2rule.Name,
 				Severity:       p2rule.Severity,
 				Confidence:     p2rule.Confidence,
 				CompositeScore: composite,
-				Phase:          2,
+				Stage:          StageBehavioral,
 			}
 		}
 	}
 
-	// Phase 3: LLM intent for persistent uncertainty (ESCALATE decisions)
+	// LLM intent classifier for persistent uncertainty (ESCALATE decisions)
 	if e.intentClassifier != nil {
-		finalAction := d1.Action
-		if d2matched {
-			finalAction = d2.Action
+		finalAction := staticDecision.Action
+		if behavioralMatched {
+			finalAction = behavioralDecision.Action
 		}
 		if finalAction == ActionEscalate {
 			creq := &intent.ClassifyRequest{
@@ -226,7 +240,7 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 					})
 				}
 			}
-			sig, err := e.intentClassifier.Classify(ctx, creq)
+			intentSig, err := e.intentClassifier.Classify(ctx, creq)
 			if err != nil {
 				rule := "llm_error"
 				if err.Error() == "model_refusal" {
@@ -234,34 +248,34 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 					// Treat as deny but distinguish from network/timeout failures.
 					rule = "llm_refusal"
 				}
-				d3 := &Decision{Action: ActionDeny, Rule: rule, Confidence: 0.60, CompositeScore: composite, Phase: 3}
+				d3 := &Decision{Action: ActionDeny, Rule: rule, Confidence: 0.60, CompositeScore: composite, Stage: StageIntentLLM}
 				e.recordCall(req, d3, composite)
 				return d3
 			}
-			d3 := applyPhase3Rules(sig, composite)
+			d3 := classifyIntent(intentSig, composite)
 			e.recordCallWithBundle(req, d3, composite, bundle)
 			return d3
 		}
 	}
 
-	if d2matched {
-		e.recordCallWithBundle(req, d2, composite, bundle)
-		return d2
+	if behavioralMatched {
+		e.recordCallWithBundle(req, behavioralDecision, composite, bundle)
+		return behavioralDecision
 	}
-	e.recordCallWithBundle(req, d1, composite, bundle)
-	return d1
+	e.recordCallWithBundle(req, staticDecision, composite, bundle)
+	return staticDecision
 }
 
-func applyPhase3Rules(sig *intent.IntentSignal, composite float64) *Decision {
+func classifyIntent(intentSig *intent.IntentSignal, composite float64) *Decision {
 	switch {
-	case sig.Intent == "malicious" && sig.Confidence > 0.8:
-		return &Decision{Action: ActionDeny, Rule: "llm_malicious", Severity: "high", Confidence: 0.90, CompositeScore: composite, Phase: 3}
-	case sig.Intent == "suspicious" && sig.Confidence > 0.8:
-		return &Decision{Action: ActionEscalate, Rule: "llm_suspicious_high", Severity: "medium", Confidence: 0.75, CompositeScore: composite, Phase: 3}
-	case sig.Intent == "legitimate" && sig.Confidence > 0.8:
-		return &Decision{Action: ActionAllow, Rule: "llm_legitimate", Confidence: 0.85, CompositeScore: composite, Phase: 3}
+	case intentSig.Intent == "malicious" && intentSig.Confidence > 0.8:
+		return &Decision{Action: ActionDeny, Rule: "llm_malicious", Severity: "high", Confidence: 0.90, CompositeScore: composite, Stage: StageIntentLLM}
+	case intentSig.Intent == "suspicious" && intentSig.Confidence > 0.8:
+		return &Decision{Action: ActionEscalate, Rule: "llm_suspicious_high", Severity: "medium", Confidence: 0.75, CompositeScore: composite, Stage: StageIntentLLM}
+	case intentSig.Intent == "legitimate" && intentSig.Confidence > 0.8:
+		return &Decision{Action: ActionAllow, Rule: "llm_legitimate", Confidence: 0.85, CompositeScore: composite, Stage: StageIntentLLM}
 	default:
-		return &Decision{Action: ActionDeny, Rule: "llm_uncertain", Confidence: 0.65, CompositeScore: composite, Phase: 3}
+		return &Decision{Action: ActionDeny, Rule: "llm_uncertain", Confidence: 0.65, CompositeScore: composite, Stage: StageIntentLLM}
 	}
 }
 
@@ -325,6 +339,7 @@ func (e *Engine) recordCallWithBundle(req *Request, d *Decision, composite float
 	if bundle != nil {
 		tc.PathSensitive = bundle.Path.HasSensitive
 		tc.PathCritical = bundle.Path.HasCritical
+		tc.NetworkWrite = bundle.Network.HasDataFlag || bundle.Network.Score > 0.5
 	}
 	s.Record(tc)
 }
@@ -355,13 +370,15 @@ func toHistoryEntries(calls []session.ToolCall, _ *signals.SignalBundle) []signa
 	entries := make([]signals.SessionHistoryEntry, len(calls))
 	for i, c := range calls {
 		entries[i] = signals.SessionHistoryEntry{
-			Tool:          c.Tool,
-			ArgSummary:    c.ArgSummary,
-			Decision:      c.Decision,
-			Rule:          c.Rule,
+			Time:           c.Time,
+			Tool:           c.Tool,
+			ArgSummary:     c.ArgSummary,
+			Decision:       c.Decision,
+			Rule:           c.Rule,
 			CompositeScore: c.CompositeScore,
-			PathSensitive: c.PathSensitive, // enables exfil_after_sensitive_read detection
-			PathCritical:  c.PathCritical,  // enables escalating_access detection
+			PathSensitive:  c.PathSensitive, // enables exfil_after_sensitive_read detection
+			PathCritical:   c.PathCritical,  // enables escalating_access detection
+			NetworkWrite:   c.NetworkWrite,
 		}
 	}
 	return entries
@@ -473,6 +490,17 @@ func (e *Engine) computeSignalsWithExtractor(tool, argsJSON, cwd string, ext *ex
 		Evasion:   evasionSig,
 	}
 
+	// Populate MLScore from command arguments
+	var args map[string]any
+	if json.Unmarshal([]byte(argsJSON), &args) == nil {
+		for _, key := range []string{"command", "cmd", "script", "shell"} {
+			if cmd, ok := args[key].(string); ok && cmd != "" {
+				bundle.MLScore = mlScorer.Score(cmd)
+				break
+			}
+		}
+	}
+
 	if applyAllowlist {
 		if al := e.allowlistForCWD(cwd); al != nil {
 			e.applyAllowlistMutations(bundle, al)
@@ -532,6 +560,9 @@ func buildEvidence(b *signals.SignalBundle) []string {
 	}
 	if b.Evasion.Score > 0.2 {
 		ev = append(ev, fmt.Sprintf("evasion score=%.2f", b.Evasion.Score))
+	}
+	if b.MLScore > 0.7 {
+		ev = append(ev, fmt.Sprintf("ml score=%.2f (heuristic maliciousness)", b.MLScore))
 	}
 	if b.Command.MaxVerbDanger > 0.5 {
 		ev = append(ev, fmt.Sprintf("dangerous verb detected (danger=%.2f)", b.Command.MaxVerbDanger))

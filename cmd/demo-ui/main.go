@@ -50,7 +50,7 @@ type RichEvent struct {
 	Severity         string       `json:"severity"`
 	Confidence       float64      `json:"confidence"`
 	CompositeScore   float64      `json:"composite_score"`
-	Phase            int          `json:"phase"`
+	Stage            string       `json:"stage"`
 	LatencyUs        int64        `json:"latency_us"`
 	Evidence         []string     `json:"evidence"`
 	Signals          SignalBundle `json:"signals"`
@@ -188,7 +188,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:7474")
 
 	ch := make(chan []byte, 64)
 	s.clientsMu.Lock()
@@ -530,7 +530,7 @@ func buildChain(decision *aegis.Decision, signals *signals.SignalBundle) []Chain
 	for _, r := range allRules {
 		if matchFound {
 			chain = append(chain, ChainStep{
-				Stage: "phase1", Name: fmt.Sprintf("[%d] %s", r.pri, r.name),
+				Stage: "static_rules", Name: fmt.Sprintf("[%d] %s", r.pri, r.name),
 				Result: "skip", LatencyUs: 0,
 				Condition: "higher-priority rule already matched",
 			})
@@ -539,9 +539,9 @@ func buildChain(decision *aegis.Decision, signals *signals.SignalBundle) []Chain
 		if r.name == decision.Rule {
 			ref := policySnippets[r.name]
 			chain = append(chain, ChainStep{
-				Stage: "phase1", Name: fmt.Sprintf("[%d] %s", r.pri, r.name),
+				Stage: "static_rules", Name: fmt.Sprintf("[%d] %s", r.pri, r.name),
 				Result:     "match",
-				LatencyUs:  int64(decision.Phase)*10 + 30,
+				LatencyUs:  30,
 				Confidence: decision.Confidence,
 				Condition:  ref.Condition,
 				FileLine:   fmt.Sprintf("%s:%d", ref.File, ref.Line),
@@ -549,7 +549,7 @@ func buildChain(decision *aegis.Decision, signals *signals.SignalBundle) []Chain
 			matchFound = true
 		} else {
 			chain = append(chain, ChainStep{
-				Stage: "phase1", Name: fmt.Sprintf("[%d] %s", r.pri, r.name),
+				Stage: "static_rules", Name: fmt.Sprintf("[%d] %s", r.pri, r.name),
 				Result: "miss", LatencyUs: 0,
 			})
 		}
@@ -592,7 +592,7 @@ func (s *Server) evaluate(tool string, args map[string]any, agentID, sessionID, 
 		Severity:       decision.Severity,
 		Confidence:     decision.Confidence,
 		CompositeScore: decision.CompositeScore,
-		Phase:          decision.Phase,
+		Stage:          string(decision.Stage),
 		LatencyUs:      latency,
 		Evidence:       decision.Evidence,
 		Signals:        buildSignals(bundle, decision),
@@ -677,28 +677,28 @@ var scenarios = map[string][]demoStep{
 	"full_demo": {}, // populated below
 }
 
-// phase2_cascade demonstrates Phase 2 behavioral analysis (retry_after_deny):
-//   Step 1: rm -rf /etc → Phase 1 DENY (records verb "rm" in session)
-//   Step 2: rm /tmp/build → Phase 1 ESCALATE (0.60) → Phase 2 retry_after_deny → DENY
+// behavioral_cascade demonstrates behavioral analysis (retry_after_deny):
+//   Step 1: rm -rf /etc → static rules DENY (records verb "rm" in session)
+//   Step 2: rm /tmp/build → static rules ESCALATE (0.60) → behavioral retry_after_deny → DENY
 //
-// phase3_cascade demonstrates Phase 3 LLM intent (requires API key):
-//   Commands that Phase 1 ESCALATEs and Phase 2 has no context for.
+// intent_cascade demonstrates LLM intent classification (requires API key):
+//   Commands that static rules ESCALATE and behavioral analysis has no context for.
 //   LLM makes the final call (malicious→DENY, legitimate→ALLOW, suspicious→ESCALATE).
-// Phase 2 cascade:
+// Behavioral cascade:
 //   rm /var/log/*.log — verb danger 0.80, path not critical/sensitive, not in project
-//   → Phase 1: shell_no_rule_matched (ESCALATE, conf=0.60 < 0.85)
-//   → Phase 2: sees prior deny verb="rm" within 60s → retry_after_deny → DENY
-// Phase 2 cascade — shows what ONLY behavioral context can catch:
+//   → static rules: shell_no_rule_matched (ESCALATE, conf=0.60 < 0.85)
+//   → behavioral: sees prior deny verb="rm" within 60s → retry_after_deny → DENY
+// Behavioral cascade — shows what ONLY behavioral context can catch:
 //
-//   Step 1-2: Baseline dev work (P1 allows with high confidence)
-//   Step 3: python3 socket call → P1 ESCALATE (uncertain interpreter, verb recorded)
-//   Step 4: another python3 script → P1 ESCALATE → P2 sees same verb escalated before
+//   Step 1-2: Baseline dev work (static rules allow with high confidence)
+//   Step 3: python3 socket call → static rules ESCALATE (uncertain interpreter, verb recorded)
+//   Step 4: another python3 script → static rules ESCALATE → behavioral sees same verb escalated before
 //            → retry_after_deny → DENY
-//   Step 5: same again — P2 still fires within 60s window
+//   Step 5: same again — behavioral still fires within 60s window
 //
-// Key insight: each python3 call looks innocent to Phase 1.
-// Only Phase 2 knows the pattern is suspicious.
-var phase2Steps = []demoStep{
+// Key insight: each python3 call looks innocent to static rules.
+// Only behavioral analysis knows the pattern is suspicious.
+var behavioralSteps = []demoStep{
 	{"git status [P1→ALLOW, benign_git_ops]", "Shell", map[string]any{"command": "git status"}, 800},
 	{"npm install [P1→ALLOW, benign_package_mgr]", "Shell", map[string]any{"command": "npm install"}, 700},
 	// Phase 1 can only ESCALATE python3 — it doesn't know what the script does
@@ -711,8 +711,8 @@ var phase2Steps = []demoStep{
 		map[string]any{"command": "python3 upload_data.py"}, 1000},
 }
 
-// Commands that Phase 1 ESCALATEs (confidence < 0.85) — genuinely ambiguous for LLM
-var phase3Steps = []demoStep{
+// Commands that static rules ESCALATE (confidence < 0.85) — genuinely ambiguous for LLM
+var intentSteps = []demoStep{
 	// These are legitimately ambiguous: Phase 1 can't be confident, Phase 2 has no history → Phase 3 needed
 	{"python3 fetch_metrics.py [Phase 1→ESCALATE → Phase 3→LLM]", "Shell", map[string]any{"command": "python3 -c \"import requests; data=requests.get('https://internal-api.company.com/metrics').json(); print(data)\""}, 1500},
 	{"node deploy check [Phase 1→ESCALATE → Phase 3→LLM]", "Shell", map[string]any{"command": "node -e \"const r=require('child_process'); r.execSync('ls ./dist && echo ready')\""}, 1400},
@@ -721,14 +721,14 @@ var phase3Steps = []demoStep{
 }
 
 func init() {
-	scenarios["phase2_cascade"] = phase2Steps
-	scenarios["phase3_cascade"] = phase3Steps
+	scenarios["behavioral_cascade"] = behavioralSteps
+	scenarios["intent_cascade"] = intentSteps
 
-	// full_demo covers all phases
+	// full_demo covers all stages
 	full := []demoStep{}
 	full = append(full, scenarios["dev_workflow"][:2]...)
 	full = append(full, scenarios["attack_sequence"][3:6]...)
-	full = append(full, phase2Steps[2:4]...) // retry_after_deny via Phase 2
+	full = append(full, behavioralSteps[2:4]...) // retry_after_deny via behavioral analysis
 	scenarios["full_demo"] = full
 }
 
@@ -739,8 +739,8 @@ func (s *Server) runScenario(name string) {
 	}
 	sid := sessionID()
 	agentID := "cursor-claude-" + sid
-	if name == "phase3_cascade" {
-		agentID = "" // no session → Phase 2 skips → Phase 3 fires on ESCALATE
+	if name == "intent_cascade" {
+		agentID = "" // no session → behavioral skips → LLM intent fires on ESCALATE
 	}
 
 	for _, step := range steps {
@@ -834,7 +834,7 @@ func main() {
 
 	// CORS for development
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:7474")
 		mux.ServeHTTP(w, r)
 	})
 
@@ -944,13 +944,12 @@ func evictPortHolder(port string, log *slog.Logger) bool {
 	return false
 }
 
+// tryBuildClassifier creates a real LLM classifier from env vars.
+// Priority: LITELLM_API_KEY → OPENAI_API_KEY → ANTHROPIC_API_KEY.
 func tryBuildClassifier(log *slog.Logger) (*intent.Classifier, error) {
 	// LiteLLM proxy (OpenAI-compatible)
 	if os.Getenv("LITELLM_API_KEY") != "" {
 		baseURL := os.Getenv("LITELLM_BASE_URL")
-		if baseURL == "" {
-			baseURL = "https://your-llm-proxy.example.com/v1"
-		}
 		model := os.Getenv("LITELLM_MODEL")
 		if model == "" {
 			model = "anthropic/claude-sonnet-4-6"
@@ -959,7 +958,7 @@ func tryBuildClassifier(log *slog.Logger) (*intent.Classifier, error) {
 		if err != nil {
 			log.Warn("LiteLLM classifier init failed", "error", err)
 		} else {
-			log.Info("Phase 3 LLM via LiteLLM proxy", "base_url", baseURL, "model", model)
+			log.Info("LLM intent classifier ready", "base_url", baseURL, "model", model)
 			return c, nil
 		}
 	}
@@ -1010,7 +1009,7 @@ func (s *Server) handlePlayground(w http.ResponseWriter, r *http.Request) {
 		AgentID string         `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid request format", http.StatusBadRequest)
 		return
 	}
 	if req.Tool == "" {

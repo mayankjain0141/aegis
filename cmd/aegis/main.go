@@ -206,8 +206,8 @@ mode: audit
 # sensitivity: strict | balanced | permissive
 sensitivity: balanced
 
-# Phase 3 LLM classifier (opt-in)
-phase3:
+# LLM intent classifier (opt-in)
+llm_classifier:
   enabled: false
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
@@ -218,7 +218,7 @@ logging:
   max_size_mb: 50
   max_files: 3
 `
-	os.WriteFile(path, []byte(content), 0o644) //nolint:errcheck
+	os.WriteFile(path, []byte(content), 0o600) //nolint:errcheck
 }
 
 func writeDefaultAllowlist(path string) {
@@ -239,7 +239,7 @@ paths_safe: []
 #  - ".env"
 #  - ".env.local"
 `
-	os.WriteFile(path, []byte(content), 0o644) //nolint:errcheck
+	os.WriteFile(path, []byte(content), 0o600) //nolint:errcheck
 }
 
 // ── aegis config ──────────────────────────────────────────────────────────────
@@ -247,12 +247,12 @@ paths_safe: []
 type Config struct {
 	Mode        string `yaml:"mode"`
 	Sensitivity string `yaml:"sensitivity"`
-	Phase3      struct {
+	LLMClassifier struct {
 		Enabled      bool   `yaml:"enabled"`
 		Model        string `yaml:"model"`
 		APIKeyEnv    string `yaml:"api_key_env"`
 		BudgetPerDay int    `yaml:"budget_per_day"`
-	} `yaml:"phase3"`
+	} `yaml:"llm_classifier"`
 	Logging struct {
 		AuditLog   string `yaml:"audit_log"`
 		MaxSizeMB  int    `yaml:"max_size_mb"`
@@ -331,7 +331,7 @@ func cmdConfig(args []string) {
 		default:
 			fatalf("unknown config key %q (supported: mode, sensitivity)", key)
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			fatalf("write config: %v", err)
 		}
 		fmt.Printf("Set %s = %s in %s\n", key, val, path)
@@ -351,7 +351,7 @@ func cmdConfigShow(cfg *Config, path string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "mode\t%s\n", cfg.Mode)
 	fmt.Fprintf(w, "sensitivity\t%s\n", cfg.Sensitivity)
-	fmt.Fprintf(w, "phase3.enabled\t%v\n", cfg.Phase3.Enabled)
+	fmt.Fprintf(w, "llm_classifier.enabled\t%v\n", cfg.LLMClassifier.Enabled)
 	fmt.Fprintf(w, "logging.audit_log\t%s\n", cfg.Logging.AuditLog)
 	w.Flush()
 }
@@ -470,7 +470,7 @@ func cmdDaemon(args []string) {
 		}
 		logFile := filepath.Join(os.Getenv("HOME"), ".aegis", "daemon.log")
 		os.MkdirAll(filepath.Dir(logFile), 0o755) //nolint:errcheck
-		f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 
 		cmd := exec.Command(self, "daemon", "run")
 		cmd.Stdout = f

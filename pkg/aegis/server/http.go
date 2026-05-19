@@ -79,7 +79,7 @@ type evaluateResponse struct {
 	Confidence     float64  `json:"confidence"`
 	Evidence       []string `json:"evidence,omitempty"`
 	CompositeScore float64  `json:"composite_score"`
-	Phase          int      `json:"phase"`
+	Stage          string   `json:"stage"`
 }
 
 func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	var req evaluateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid request format", http.StatusBadRequest)
 		return
 	}
 
@@ -108,7 +108,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		Confidence:     decision.Confidence,
 		Evidence:       decision.Evidence,
 		CompositeScore: decision.CompositeScore,
-		Phase:          decision.Phase,
+		Stage:          string(decision.Stage),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

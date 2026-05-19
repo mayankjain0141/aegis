@@ -20,6 +20,7 @@ type ToolCall struct {
 	// These must be populated from the signal bundle in engine.recordCall.
 	PathSensitive bool
 	PathCritical  bool
+	NetworkWrite  bool
 }
 
 // DenyEvent records a deny decision for retry detection.
@@ -44,6 +45,7 @@ type State struct {
 	toolCounts  map[string]int
 	baseline    map[string]float64 // tool distribution from first 5 min
 	baselineSet bool
+	ewma        *EWMABaseline
 	mu          sync.RWMutex
 }
 
@@ -54,6 +56,7 @@ func New(agentID string) *State {
 		StartTime:  time.Now(),
 		toolCounts: make(map[string]int),
 		baseline:   make(map[string]float64),
+		ewma:       NewEWMABaseline(0.02, 10),
 	}
 }
 
@@ -67,6 +70,7 @@ func (s *State) Record(call ToolCall) {
 	if s.callCount < len(s.calls) {
 		s.callCount++
 	}
+	s.ewma.Update(call.Tool)
 
 	if call.Decision == "deny" || call.Decision == "escalate" {
 		ev := DenyEvent{Time: call.Time, Tool: call.Tool, Verb: call.PrimaryVerb, Rule: call.Rule}
@@ -296,4 +300,64 @@ type SessionSignal struct {
 	RiskTrend           float64
 	BaselineDeviation   float64
 	BaselineEstablished bool // true only after 5+ minutes of traffic
+}
+
+// EWMABaseline tracks tool-usage distribution using exponential weighted moving average.
+type EWMABaseline struct {
+	weights     map[string]float64
+	frozen      bool
+	sampleCount int
+	minSamples  int
+	slowAlpha   float64
+}
+
+// NewEWMABaseline creates a new EWMA baseline tracker.
+func NewEWMABaseline(slowAlpha float64, minSamples int) *EWMABaseline {
+	return &EWMABaseline{
+		weights:    make(map[string]float64),
+		slowAlpha:  slowAlpha,
+		minSamples: minSamples,
+	}
+}
+
+func (b *EWMABaseline) Update(tool string) {
+	if b.frozen {
+		return
+	}
+	b.sampleCount++
+	alpha := b.slowAlpha
+	b.weights[tool] = b.weights[tool]*(1-alpha) + alpha
+	for k := range b.weights {
+		if k != tool {
+			b.weights[k] = b.weights[k] * (1 - alpha)
+		}
+	}
+}
+
+func (b *EWMABaseline) Freeze() { b.frozen = true }
+
+func (b *EWMABaseline) Established() bool { return b.sampleCount >= b.minSamples }
+
+func (b *EWMABaseline) Deviation(tool string) float64 {
+	if !b.Established() {
+		return 0.0
+	}
+	w := b.weights[tool]
+	maxW := 0.0
+	for _, v := range b.weights {
+		if v > maxW {
+			maxW = v
+		}
+	}
+	if maxW == 0 {
+		return 0.0
+	}
+	return 1.0 - (w / maxW)
+}
+
+// Freeze freezes the session's EWMA baseline.
+func (s *State) Freeze() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ewma.Freeze()
 }

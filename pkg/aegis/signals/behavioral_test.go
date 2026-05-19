@@ -35,7 +35,7 @@ func historyEntry(t time.Time, pathSensitive, pathCritical bool, argSummary stri
 func callBehavioral(bundle *SignalBundle, verb string, history []SessionHistoryEntry,
 	callsPerMin int, lastDenyAgo time.Duration, lastDenyVerb string,
 	baselineDev, riskTrend float64) BehavioralSignal {
-	b2 := ComputeBehavioral(bundle, verb, history, callsPerMin, lastDenyAgo, lastDenyVerb, baselineDev, riskTrend)
+	b2 := ComputeBehavioral(bundle, verb, history, callsPerMin, lastDenyAgo, lastDenyVerb, baselineDev, riskTrend, time.Now())
 	return b2
 }
 

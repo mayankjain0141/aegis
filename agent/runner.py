@@ -150,7 +150,10 @@ def get_shim() -> AegisShimConnection:
 MODEL = os.environ.get("AEGIS_MODEL", "anthropic/claude-sonnet-4-6")
 
 api_key = os.environ.get("LITELLM_API_KEY")
-base_url = os.environ.get("LITELLM_BASE_URL", "https://your-llm-proxy.example.com")
+base_url = os.environ.get("LITELLM_BASE_URL")
+if not base_url:
+    print("ERROR: LITELLM_BASE_URL not set. Set it to your OpenAI-compatible API endpoint.", file=sys.stderr)
+    sys.exit(1)
 
 if not api_key:
     print("ERROR: LITELLM_API_KEY not set. Copy .env.example to .env and fill in values.", file=sys.stderr)
