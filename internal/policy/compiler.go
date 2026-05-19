@@ -248,6 +248,28 @@ func compileCondition(cond Condition) (Predicate, error) {
 		})
 	}
 
+	// Tier 2: Expr
+	if cond.Expr != "" {
+		pred, err := CompileExpr(cond.Expr)
+		if err != nil {
+			return nil, fmt.Errorf("compile expr: %w", err)
+		}
+		predicates = append(predicates, pred)
+	}
+
+	// Tier 3: Rego
+	if cond.Rego != "" {
+		query := cond.RegoRule
+		if query == "" {
+			query = "data.aegis.deny"
+		}
+		pred, err := CompileRego(cond.Rego, query)
+		if err != nil {
+			return nil, fmt.Errorf("compile rego condition: %w", err)
+		}
+		predicates = append(predicates, pred)
+	}
+
 	// Empty condition always-false
 	if len(predicates) == 0 {
 		return func(*signals.SignalBundle) bool { return false }, nil
