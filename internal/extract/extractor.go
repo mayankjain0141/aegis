@@ -58,7 +58,7 @@ func (e *Extractor) isShellTool(tool string) bool {
 	}
 	// Fallback for when command DB has no tool_types section
 	switch tool {
-	case "shell_exec", "run_command", "bash", "Bash", "execute_command", "terminal":
+	case "Shell", "shell_exec", "run_command", "bash", "Bash", "execute_command", "terminal":
 		return true
 	}
 	return false
