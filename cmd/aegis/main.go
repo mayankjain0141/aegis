@@ -39,6 +39,18 @@ func main() {
 		cmdTelemetry(os.Args[2:])
 	case "daemon":
 		cmdDaemon(os.Args[2:])
+	case "validate":
+		runValidate(os.Args[2:])
+	case "explain":
+		runExplain(os.Args[2:])
+	case "simulate":
+		runSimulate(os.Args[2:])
+	case "rules":
+		runRules(os.Args[2:])
+	case "allow":
+		runAllow(os.Args[2:])
+	case "doctor":
+		runDoctor(os.Args[2:])
 	case "version":
 		fmt.Println("aegis v2.0.0")
 	case "help", "--help", "-h":
@@ -54,16 +66,25 @@ func printUsage() {
 	fmt.Print(`aegis — AI agent security policy engine
 
 Usage:
-  aegis init              Install hooks.json and create default config
-  aegis config get <key>  Show a config value
-  aegis config set <key> <value>  Update a config value
-  aegis config show       Show full config
-  aegis audit-report      Show what would be blocked (audit mode summary)
-  aegis telemetry [show|clear]  Show decision telemetry summary
-  aegis daemon start      Start the session state daemon
-  aegis daemon stop       Stop the daemon
-  aegis daemon status     Show daemon status
-  aegis version           Print version
+  aegis init                          Install hooks.json and create default config
+  aegis config get <key>              Show a config value
+  aegis config set <key> <value>      Update a config value
+  aegis config show                   Show full config
+  aegis audit-report                  Show what would be blocked (audit mode summary)
+  aegis telemetry [show|clear]        Show decision telemetry summary
+  aegis daemon start                  Start the session state daemon
+  aegis daemon stop                   Stop the daemon
+  aegis daemon status                 Show daemon status
+
+Policy authoring:
+  aegis validate <path>               Validate policy YAML files in a directory or file
+  aegis explain <rule-name>           Show what a rule does and how to override it
+  aegis simulate --tool T --command C Run a request through the engine and show the decision
+  aegis rules list [--action <a>]     List all rules sorted by priority
+  aegis allow last                    Generate allowlist YAML from the last denied action
+  aegis doctor                        Self-diagnostic check
+
+  aegis version                       Print version
 
 Environment:
   AEGIS_MODE=audit        Log decisions but allow everything
