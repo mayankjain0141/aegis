@@ -1,0 +1,294 @@
+rules:
+  - name: benign_read_only
+    priority: 50
+    action: allow
+    severity: ""
+    confidence: 0.99
+    description: >
+      Allows file_read and search tool operations where all paths are within the project
+      directory. Reading project files is the core workflow of an AI coding assistant.
+    tags: [filesystem, read, project]
+    condition:
+      or:
+        - tool_category: file_read
+        - tool_category: search
+      path:
+        all_in_project: true
+
+  - name: benign_safe_shell
+    priority: 51
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows shell commands composed entirely of known-safe read-only verbs (ls, echo, pwd,
+      whoami, date, cat, head, tail, wc, file, stat, find, grep, which, type, df, du, ps,
+      env, printenv, uname, hostname, id, groups, history, alias) targeting non-critical,
+      non-sensitive paths. Blocked if DLP hits a real secret.
+    tags: [shell, read-only, safe]
+    condition:
+      expr: >
+        !b.DLP.HasHit_nonTest &&
+        allVerbsSafe(b, safeShellVerbs) &&
+        !b.Path.HasCritical &&
+        !b.Path.HasSensitive
+
+  - name: benign_package_mgr
+    priority: 52
+    action: allow
+    severity: ""
+    confidence: 0.90
+    description: >
+      Allows package manager invocations: npm, pip, pip3, cargo, yarn, brew, apt, apt-get,
+      yum, dnf, pacman, gem, composer, pnpm, bun, poetry, uv, pipenv.
+      (git handled by benign_git_ops; go handled by benign_go_ops.)
+    tags: [shell, package-manager]
+    condition:
+      any_verb: [npm, pip, pip3, cargo, yarn, brew, apt, apt-get, yum, dnf, pacman, gem, composer, pnpm, bun, poetry, uv, pipenv]
+
+  - name: benign_go_ops
+    priority: 53
+    action: allow
+    severity: ""
+    confidence: 0.93
+    description: >
+      Allows safe go subcommands: build, test, mod, get, fmt, vet, clean, env, list,
+      tool, version, doc, install, work, generate. The go binary's subcommands are
+      checked; bare "go" without a recognized subcommand does not match.
+    tags: [shell, go, build]
+    condition:
+      expr: isGoSafeSubcommand(b)
+
+  - name: benign_build_tools
+    priority: 54
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows build tool invocations: make, cmake, gradle, mvn, tsc, gcc, g++, clang,
+      rustc, javac, ant, bazel, ninja.
+    tags: [shell, build]
+    condition:
+      any_verb: [make, cmake, gradle, mvn, tsc, gcc, "g++", clang, rustc, javac, ant, bazel, ninja]
+
+  - name: benign_project_rm
+    priority: 54
+    action: allow
+    severity: ""
+    confidence: 0.92
+    description: >
+      Allows rm commands when: all paths are within the project directory, no sensitive or
+      critical paths are targeted, and removed paths are build artifacts (node_modules, dist,
+      build, target, .next, coverage, __pycache__, .cache, vendor, etc.).
+    tags: [filesystem, delete, project, artifacts]
+    condition:
+      expr: >
+        anyVerb(b, "rm") &&
+        b.Path.AllInProject &&
+        !b.Path.HasSensitive &&
+        !b.Path.HasCritical &&
+        removesArtifacts(b)
+
+  - name: benign_docker_ops
+    priority: 55
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows docker, docker-compose, kubectl, helm, and podman commands unless they use
+      privileged flags (--privileged, --pid=host, --network=host) or kubectl exec with
+      a shell interpreter (which enables container breakout).
+    tags: [shell, docker, container]
+    condition:
+      expr: >
+        anyVerb(b, "docker", "docker-compose", "kubectl", "helm", "podman") &&
+        !isPrivilegedDocker(b)
+
+  - name: benign_test_run
+    priority: 56
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows test runner invocations: pytest, jest, mocha, jasmine, vitest, karma,
+      phpunit, rspec, minitest, go test, cargo test, python3 -m pytest, python -m unittest.
+    tags: [shell, test]
+    condition:
+      expr: isTestRunner(b)
+
+  - name: benign_git_ops
+    priority: 57
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows git commands with safe subcommands: status, add, commit, push, pull, log,
+      diff, checkout, branch, stash, fetch, tag, merge, rebase, clone, show, blame,
+      describe, shortlog, remote, config, init, submodule, worktree, bisect, cherry-pick.
+      Requires the binary to be "git" with a recognized subcommand.
+    tags: [shell, git, vcs]
+    condition:
+      expr: isGitSafeSubcommand(b)
+
+  - name: benign_empty_command
+    priority: 58
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows empty or whitespace-only shell commands (no verbs extracted). Blocked if
+      DLP detects a real secret (e.g. secrets passed via env vars in the command string).
+    tags: [shell, empty]
+    condition:
+      expr: >
+        b.ToolClass.Category == "shell" &&
+        len(b.Command.Verbs) == 0 &&
+        !(b.DLP.HasHit && !b.DLP.AllTest)
+
+  - name: benign_tmp_safe_ops
+    priority: 59
+    action: allow
+    severity: ""
+    confidence: 0.90
+    description: >
+      Allows safe file operations (mkdir, touch, ls, cp, mv, stat, find, cat, rm, rmdir)
+      in /tmp or /var/tmp when: no sensitive/critical paths, no DLP hit, network score ≤ 0.1,
+      no data upload flag, and ALL paths are in /tmp or /var/tmp or are project-relative.
+    tags: [shell, tmp, safe]
+    condition:
+      expr: isTmpSafeOp(b)
+
+  - name: benign_chmod_chown_local
+    priority: 60
+    action: allow
+    severity: ""
+    confidence: 0.88
+    description: >
+      Allows chmod and chown on non-critical, non-sensitive paths when not combined with
+      network activity or interpreter verbs (download-and-chmod attack pattern).
+      SUID manipulation is excluded (handled by suid_manipulation deny rule, priority 19).
+    tags: [shell, filesystem, permissions]
+    condition:
+      expr: >
+        anyVerb(b, "chmod", "chown") &&
+        !isSuidChmod(b) &&
+        b.Network.Score <= 0.1 &&
+        !b.Network.HasDataFlag &&
+        !hasInterpreterOrDownloadVerb(b) &&
+        !b.Path.HasCritical &&
+        !b.Path.HasSensitive
+
+  - name: benign_network_read
+    priority: 61
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows network read-only commands (curl, wget, ping, nslookup, dig, host,
+      traceroute, tracepath, whois) when: no data upload flag, no stdin pipe, network
+      score ≤ 0.35, no sensitive/critical paths, no real DLP secret hit, and ALL verbs
+      are in the read-only network set.
+    tags: [network, read-only]
+    condition:
+      expr: isNetworkReadOnly(b)
+
+  - name: benign_scp_rsync_ssh
+    priority: 62
+    action: allow
+    severity: ""
+    confidence: 0.80
+    description: >
+      Allows scp and rsync deployment commands when: no sensitive/critical file targets,
+      no DLP hit, no data upload flag, and no SSH reverse/forward tunnel flags (-R/-L).
+    tags: [network, deploy, scp]
+    condition:
+      expr: >
+        anyVerb(b, "scp", "rsync") &&
+        !hasSSHTunnel(b) &&
+        !b.Path.HasSensitive &&
+        !b.Path.HasCritical &&
+        !b.DLP.HasHit &&
+        !b.Network.HasDataFlag
+
+  - name: benign_file_write_project
+    priority: 63
+    action: allow
+    severity: ""
+    confidence: 0.90
+    description: >
+      Allows file_write tool operations where all paths are within the project directory
+      and no sensitive or critical paths are targeted.
+    tags: [filesystem, write, project]
+    condition:
+      tool_category: file_write
+      path:
+        all_in_project: true
+        has_sensitive: false
+        has_critical: false
+
+  - name: benign_safe_read_system
+    priority: 63
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows read-only shell commands (ls, cat, head, tail, stat, wc, file, less, more)
+      on /etc/* and /usr/share/* and /usr/local/* paths that are flagged as critical but
+      not sensitive. Excludes /proc, /sys, /dev (runtime state exposure). No DLP hit,
+      network score ≤ 0.1.
+    tags: [shell, read-only, system]
+    condition:
+      expr: isSafeSystemRead(b)
+
+  - name: benign_file_delete_project
+    priority: 64
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows file_delete tool operations where all paths are within the project directory
+      and no sensitive or critical paths are targeted.
+    tags: [filesystem, delete, project]
+    condition:
+      tool_category: file_delete
+      path:
+        all_in_project: true
+        has_sensitive: false
+        has_critical: false
+
+  - name: benign_shell_low_danger
+    priority: 65
+    action: allow
+    severity: ""
+    confidence: 0.80
+    description: >
+      Allows shell commands when: max verb danger < 0.30, no shell interpreter verbs,
+      no sensitive/critical paths, network score ≤ 0.20, no data upload flag, no real
+      DLP hit, evasion score ≤ 0.20.
+    tags: [shell, low-danger]
+    condition:
+      expr: >
+        b.ToolClass.Category == "shell" &&
+        b.Command.MaxVerbDanger < 0.30 &&
+        !hasInterpreterVerb(b) &&
+        !b.Path.HasSensitive &&
+        !b.Path.HasCritical &&
+        b.Network.Score <= 0.20 &&
+        !b.Network.HasDataFlag &&
+        !(b.DLP.HasHit && !b.DLP.AllTest) &&
+        b.Evasion.Score <= 0.20 &&
+        len(b.Command.Verbs) > 0
+
+  - name: benign_safe_cmd_all_verbs
+    priority: 66
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows shell commands where every verb is in the known-safe read-only set (ls, cat,
+      echo, pwd, whoami, date, head, tail, wc, file, stat, grep, which, type, df, du, ps,
+      printenv, env, uname, hostname, id, groups, man, info, find). find -exec with
+      elevated-danger commands (rm, etc.) is excluded.
+    tags: [shell, read-only, safe-all-verbs]
+    condition:
+      expr: isSafeCmdAllVerbs(b)
