@@ -23,10 +23,11 @@ import (
 	"time"
 
 	"github.com/mayjain/aegis/pkg/aegis"
+	aegisdaemon "github.com/mayjain/aegis/pkg/aegis/daemon"
 	"github.com/mayjain/aegis/pkg/aegis/telemetry"
 )
 
-const daemonSocketPath = "/tmp/aegis-daemon.sock"
+const daemonSocketPath = aegisdaemon.SocketPath
 const daemonTimeout = 200 * time.Millisecond
 const daemonAPIVersion = "1"
 

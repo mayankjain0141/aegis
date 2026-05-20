@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/mayjain/aegis/pkg/aegis"
+	aegisdaemon "github.com/mayjain/aegis/pkg/aegis/daemon"
 	"github.com/mayjain/aegis/pkg/aegis/server"
 	"github.com/mayjain/aegis/pkg/aegis/telemetry"
 )
@@ -466,8 +467,8 @@ func countAction(entries []AuditEntry, action string) int {
 
 // ── aegis daemon ──────────────────────────────────────────────────────────────
 
-const daemonPIDFile = "/tmp/aegis-daemon.pid"
-const daemonSocketPath = "/tmp/aegis-daemon.sock"
+const daemonPIDFile = aegisdaemon.PIDFile
+const daemonSocketPath = aegisdaemon.SocketPath
 
 func cmdDaemon(args []string) {
 	if len(args) == 0 {
