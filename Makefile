@@ -1,4 +1,4 @@
-.PHONY: build install test smoke test-attacks bench lint fmt ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs ml-test ml-train models
+.PHONY: build install test smoke test-attacks bench lint lint-fix fmt vet ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs ml-test ml-train models
 
 build:
 	go build -buildvcs=false -o bin/aegis ./cmd/aegis
@@ -108,7 +108,13 @@ except ImportError: \
 lint:
 	golangci-lint run ./...
 
-fmt:
-	gofmt -w .
+lint-fix:
+	golangci-lint run --fix ./...
 
-ci: lint test build
+fmt:
+	golangci-lint fmt ./...
+
+vet:
+	go vet ./...
+
+ci: lint vet test build
