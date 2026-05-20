@@ -3,6 +3,8 @@ package aegis
 import (
 	"sync"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/mayjain/aegis/pkg/aegis/allowlist"
 	"github.com/mayjain/aegis/pkg/aegis/bloom"
 )
@@ -23,6 +25,7 @@ type defaultFastPath struct {
 	bloom      *bloom.Filter
 	allowlists map[string]*allowlist.Config
 	mu         sync.RWMutex
+	sfGroup    singleflight.Group
 }
 
 func newDefaultFastPath(bl *bloom.Filter, als map[string]*allowlist.Config) FastPath {
@@ -72,11 +75,14 @@ func (fp *defaultFastPath) allowlistForCWD(cwd string) *allowlist.Config {
 	}
 	fp.mu.RUnlock()
 
-	cfg := allowlist.Load(cwd)
-	fp.mu.Lock()
-	fp.allowlists[cwd] = cfg
-	fp.mu.Unlock()
-	return cfg
+	v, _, _ := fp.sfGroup.Do(cwd, func() (any, error) {
+		cfg := allowlist.Load(cwd)
+		fp.mu.Lock()
+		fp.allowlists[cwd] = cfg
+		fp.mu.Unlock()
+		return cfg, nil
+	})
+	return v.(*allowlist.Config)
 }
 
 func (fp *defaultFastPath) setAllowlist(key string, cfg *allowlist.Config) {
