@@ -1,0 +1,133 @@
+# Command Database — maps binary names to their security semantics.
+# This is loaded at runtime, not compiled into the binary.
+# Source: curated from GTFOBins, Falco, osquery-defense-kit.
+# Update with: make sync-rules
+
+version: "2026-05-09"
+
+# Operation types: read, write, delete, execute, network, none
+
+commands:
+  # --- Destructive ---
+  rm:       { op: delete }
+  rmdir:    { op: delete }
+  shred:    { op: delete }
+  unlink:   { op: delete }
+  mkfs:     { op: delete }
+  fdisk:    { op: delete }
+
+  # --- Write ---
+  cp:       { op: write }
+  mv:       { op: write }
+  touch:    { op: write }
+  mkdir:    { op: write }
+  chmod:    { op: write }
+  chown:    { op: write }
+  ln:       { op: write }
+  tee:      { op: write }
+  dd:       { op: write }
+  sed:      { op: write }
+
+  # --- Read ---
+  cat:      { op: read }
+  head:     { op: read }
+  tail:     { op: read }
+  less:     { op: read }
+  more:     { op: read }
+  file:     { op: read }
+  stat:     { op: read }
+  wc:       { op: read }
+  strings:  { op: read }
+  xxd:      { op: read }
+
+  # --- Execute / System ---
+  sudo:     { op: execute }
+  su:       { op: execute }
+  doas:     { op: execute }
+  shutdown: { op: execute }
+  reboot:   { op: execute }
+  halt:     { op: execute }
+  systemctl: { op: execute }
+  kill:     { op: execute }
+  killall:  { op: execute }
+  crontab:  { op: write }
+
+  # --- Network ---
+  curl:     { op: network }
+  wget:     { op: network }
+  nc:       { op: network }
+  ncat:     { op: network }
+  netcat:   { op: network }
+  ssh:      { op: network }
+  scp:      { op: network }
+  rsync:    { op: network }
+  socat:    { op: network }
+  telnet:   { op: network }
+
+  # --- Interpreters (code_flag = flag that accepts inline code) ---
+  python:   { op: execute, code_flag: "-c" }
+  python3:  { op: execute, code_flag: "-c" }
+  node:     { op: execute, code_flag: "-e" }
+  ruby:     { op: execute, code_flag: "-e" }
+  perl:     { op: execute, code_flag: "-e" }
+  php:      { op: execute, code_flag: "-r" }
+
+  # --- Package managers ---
+  apt:      { op: execute }
+  pip:      { op: execute }
+  npm:      { op: execute }
+  cargo:    { op: execute }
+  brew:     { op: execute }
+
+  # --- Container / orchestration ---
+  docker:   { op: execute }
+  kubectl:  { op: execute }
+  podman:   { op: execute }
+
+  # --- Encoding (suspicious in pipelines) ---
+  base64:   { op: read }
+  openssl:  { op: execute }
+
+  # --- Safe / informational ---
+  ls:       { op: read }
+  find:     { op: read }
+  grep:     { op: read }
+  rg:       { op: read }
+  git:      { op: read }
+  echo:     { op: none }
+  printf:   { op: none }
+  true:     { op: none }
+  false:    { op: none }
+  test:     { op: none }
+
+# Shell interpreters trigger recursive parsing of -c argument
+shell_interpreters:
+  - sh
+  - bash
+  - zsh
+  - dash
+  - ksh
+  - fish
+
+# Command wrappers are stripped to get the real command
+command_wrappers:
+  - sudo
+  - doas
+  - env
+  - nice
+  - timeout
+  - time
+  - nohup
+  - command
+  - builtin
+  - exec
+
+tool_types:
+  shell: [shell_exec, run_command, bash, Bash, execute_command, terminal]
+  file: [file_read, read_file, file_write, write_file, file_delete, delete_file]
+  network: [http_request, api_call, fetch, web_request]
+
+field_mappings:
+  path_fields: [path, file, filename, filepath]
+  host_fields: [url, host, endpoint, uri]
+  command_fields: [command, cmd, script, shell, commandline]

@@ -32,3 +32,8 @@ func LoadFile(path string) (*PolicyFile, error) {
 	}
 	return pf, nil
 }
+
+// LoadBytes parses a policy file from raw bytes.
+func LoadBytes(data []byte) (*PolicyFile, error) {
+	return LoadString(string(data))
+}

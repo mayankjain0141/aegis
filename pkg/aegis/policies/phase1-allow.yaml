@@ -1,0 +1,437 @@
+rules:
+  - name: benign_read_only
+    priority: 50
+    action: allow
+    severity: ""
+    confidence: 0.99
+    description: >
+      Allows file_read and search tool operations where all paths are within the project
+      directory. Reading project files is the core workflow of an AI coding assistant.
+    tags: [filesystem, read, project]
+    condition:
+      and:
+        - or:
+            - tool_category: file_read
+            - tool_category: search
+        - path:
+            all_in_project: true
+
+  - name: benign_safe_shell
+    priority: 51
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows shell commands composed entirely of known-safe read-only verbs (ls, echo, pwd,
+      whoami, date, cat, head, tail, wc, file, stat, find, grep, which, type, df, du, ps,
+      env, printenv, uname, hostname, id, groups, history, alias) targeting non-critical,
+      non-sensitive paths. Blocked if DLP hits a real secret.
+    tags: [shell, read-only, safe]
+    condition:
+      and:
+        - tool_category: shell
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - expr: >
+            len(verbs) > 0 &&
+            all(verbs, {# == "ls" || # == "echo" || # == "pwd" || # == "whoami" || # == "date" ||
+              # == "cat" || # == "head" || # == "tail" || # == "wc" || # == "file" ||
+              # == "stat" || # == "find" || # == "grep" || # == "which" || # == "type" ||
+              # == "df" || # == "du" || # == "ps" || # == "env" || # == "printenv" ||
+              # == "uname" || # == "hostname" || # == "id" || # == "groups" ||
+              # == "history" || # == "alias"})
+        - path:
+            has_critical: false
+        - path:
+            has_sensitive: false
+
+  - name: benign_package_mgr
+    priority: 52
+    action: allow
+    severity: ""
+    confidence: 0.90
+    description: >
+      Allows package manager invocations: npm, pip, pip3, cargo, yarn, brew, apt, apt-get,
+      yum, dnf, pacman, gem, composer, pnpm, bun, poetry, uv, pipenv.
+      (git handled by benign_git_ops; go handled by benign_go_ops.)
+    tags: [shell, package-manager]
+    condition:
+      any_verb: [npm, pip, pip3, cargo, yarn, brew, apt, apt-get, yum, dnf, pacman, gem, composer, pnpm, bun, poetry, uv, pipenv]
+
+  - name: benign_go_ops
+    priority: 53
+    action: allow
+    severity: ""
+    confidence: 0.93
+    description: >
+      Allows safe go subcommands: build, test, mod, get, fmt, vet, clean, env, list,
+      tool, version, doc, install, work, generate. The go binary's subcommands are
+      checked; bare "go" without a recognized subcommand does not match.
+    tags: [shell, go, build]
+    condition:
+      expr: >
+        any(commands, {
+          .binary == "go" && len(.args) > 0 &&
+          (.args[0] == "build" || .args[0] == "test" || .args[0] == "mod" || .args[0] == "get" ||
+           .args[0] == "fmt" || .args[0] == "vet" || .args[0] == "clean" || .args[0] == "env" ||
+           .args[0] == "list" || .args[0] == "tool" || .args[0] == "version" || .args[0] == "doc" ||
+           .args[0] == "install" || .args[0] == "work" || .args[0] == "generate")
+        })
+
+  - name: benign_build_tools
+    priority: 54
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows build tool invocations: make, cmake, gradle, mvn, tsc, gcc, g++, clang,
+      rustc, javac, ant, bazel, ninja.
+    tags: [shell, build]
+    condition:
+      any_verb: [make, cmake, gradle, mvn, tsc, gcc, "g++", clang, rustc, javac, ant, bazel, ninja]
+
+  - name: benign_project_rm
+    priority: 54
+    action: allow
+    severity: ""
+    confidence: 0.92
+    description: >
+      Allows rm commands when: all paths are within the project directory, no sensitive or
+      critical paths are targeted, and removed paths are build artifacts (node_modules, dist,
+      build, target, .next, coverage, __pycache__, .cache, vendor, etc.).
+    tags: [filesystem, delete, project, artifacts]
+    condition:
+      and:
+        - any_verb: [rm]
+        - path:
+            all_in_project: true
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+        - expr: >
+            len(paths) > 0 &&
+            all(paths, {
+              Contains(#, "node_modules") || Contains(#, "dist") || Contains(#, "build") ||
+              Contains(#, "target") || Contains(#, ".next") || Contains(#, "coverage") ||
+              Contains(#, "__pycache__") || Contains(#, ".cache") || Contains(#, ".pytest_cache") ||
+              Contains(#, ".tox") || Contains(#, "venv") || Contains(#, ".venv") ||
+              Contains(#, "vendor") || Contains(#, "obj") || Contains(#, "/bin/") ||
+              Contains(#, ".gradle") || Contains(#, ".m2")
+            })
+
+  - name: benign_docker_ops
+    priority: 55
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows docker, docker-compose, kubectl, helm, and podman commands unless they use
+      privileged flags (--privileged, --pid=host, --network=host) or kubectl exec with
+      a shell interpreter (which enables container breakout).
+    tags: [shell, docker, container]
+    condition:
+      and:
+        - any_verb: [docker, docker-compose, kubectl, helm, podman]
+        - expr: >
+            !any(commands, {
+              (.binary == "docker" || .binary == "docker-compose") &&
+              any(.args, {# == "--privileged" || # == "--pid=host" || # == "--network=host"})
+            })
+        - expr: >
+            !any(commands, {
+              .binary == "kubectl" && any(.args, {# == "exec"}) &&
+              any(.args, {# == "bash" || # == "sh" || # == "zsh" || # == "/bin/bash" || # == "/bin/sh" || # == "--"})
+            })
+
+  - name: benign_test_run
+    priority: 56
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows test runner invocations: pytest, jest, mocha, jasmine, vitest, karma,
+      phpunit, rspec, minitest, go test, cargo test, python3 -m pytest, python -m unittest.
+    tags: [shell, test]
+    condition:
+      or:
+        - any_verb: [pytest, jest, mocha, jasmine, vitest, karma, phpunit, rspec, minitest]
+        - expr: >
+            any(commands, {
+              (.binary == "go" || .binary == "cargo") && len(.args) > 0 && .args[0] == "test"
+            })
+        - expr: >
+            any(commands, {
+              (.binary == "python3" || .binary == "python") &&
+              len(.args) >= 2 && .args[0] == "-m" &&
+              (.args[1] == "pytest" || .args[1] == "unittest")
+            })
+
+  - name: benign_git_ops
+    priority: 57
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows git commands with safe subcommands: status, add, commit, push, pull, log,
+      diff, checkout, branch, stash, fetch, tag, merge, rebase, clone, show, blame,
+      describe, shortlog, remote, config, init, submodule, worktree, bisect, cherry-pick.
+      Requires the binary to be "git" with a recognized subcommand.
+    tags: [shell, git, vcs]
+    condition:
+      and:
+        - any_verb: [git]
+        - expr: >
+            any(commands, {
+              .binary == "git" && len(.args) > 0 &&
+              (.args[0] == "status" || .args[0] == "add" || .args[0] == "commit" || .args[0] == "push" ||
+               .args[0] == "pull" || .args[0] == "log" || .args[0] == "diff" || .args[0] == "checkout" ||
+               .args[0] == "branch" || .args[0] == "stash" || .args[0] == "fetch" || .args[0] == "tag" ||
+               .args[0] == "merge" || .args[0] == "rebase" || .args[0] == "clone" || .args[0] == "show" ||
+               .args[0] == "blame" || .args[0] == "describe" || .args[0] == "shortlog" ||
+               .args[0] == "remote" || .args[0] == "config" || .args[0] == "init" || .args[0] == "submodule" ||
+               .args[0] == "worktree" || .args[0] == "bisect" || .args[0] == "cherry-pick")
+            })
+
+  - name: benign_empty_command
+    priority: 58
+    action: allow
+    severity: ""
+    confidence: 0.95
+    description: >
+      Allows empty or whitespace-only shell commands (no verbs extracted). Blocked if
+      DLP detects a real secret (e.g. secrets passed via env vars in the command string).
+    tags: [shell, empty]
+    condition:
+      and:
+        - tool_category: shell
+        - expr: "len(verbs) == 0"
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+
+  - name: benign_tmp_safe_ops
+    priority: 59
+    action: allow
+    severity: ""
+    confidence: 0.90
+    description: >
+      Allows safe file operations (mkdir, touch, ls, cp, mv, stat, find, cat, rm, rmdir)
+      in /tmp or /var/tmp when: no sensitive/critical paths, no DLP hit, network score <= 0.1,
+      no data upload flag, and ALL paths are in /tmp or /var/tmp or are project-relative.
+    tags: [shell, tmp, safe]
+    condition:
+      and:
+        - tool_category: shell
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - expr: "network_score <= 0.1 && !has_data_flag"
+        - expr: >
+            len(verbs) > 0 &&
+            all(verbs, {# == "mkdir" || # == "touch" || # == "ls" || # == "cp" || # == "mv" ||
+              # == "stat" || # == "find" || # == "cat" || # == "rm" || # == "rmdir"})
+        - expr: >
+            len(paths) > 0 &&
+            all(paths, {HasPrefix(#, "/tmp/") || HasPrefix(#, "/var/tmp/") || !HasPrefix(#, "/")})
+
+  - name: benign_chmod_chown_local
+    priority: 60
+    action: allow
+    severity: ""
+    confidence: 0.88
+    description: >
+      Allows chmod and chown on non-critical, non-sensitive paths when not combined with
+      network activity or interpreter verbs (download-and-chmod attack pattern).
+      SUID manipulation is excluded (handled by suid_manipulation deny rule, priority 19).
+    tags: [shell, filesystem, permissions]
+    condition:
+      and:
+        - any_verb: [chmod, chown]
+        - expr: "network_score <= 0.1 && !has_data_flag"
+        - expr: >
+            !any(commands, {
+              .binary == "chmod" && any(.args, {# == "+s" || # == "u+s" || # == "g+s" || Contains(#, "+s") || (len(#) == 4 && HasPrefix(#, "4"))})
+            })
+        - expr: >
+            !any(verbs, {# == "bash" || # == "sh" || # == "curl" || # == "wget"})
+        - path:
+            has_critical: false
+        - path:
+            has_sensitive: false
+
+  - name: benign_network_read
+    priority: 61
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows network read-only commands (curl, wget, ping, nslookup, dig, host,
+      traceroute, tracepath, whois) when: no data upload flag, no stdin pipe, network
+      score <= 0.35, no sensitive/critical paths, no real DLP secret hit, and ALL verbs
+      are in the read-only network set.
+    tags: [network, read-only]
+    condition:
+      and:
+        - network:
+            has_data_flag: false
+        - network:
+            has_stdin_pipe: false
+        - expr: "network_score <= 0.35"
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - expr: >
+            len(verbs) > 0 &&
+            all(verbs, {# == "curl" || # == "wget" || # == "ping" || # == "nslookup" ||
+              # == "dig" || # == "host" || # == "traceroute" || # == "tracepath" || # == "whois"})
+
+  - name: benign_scp_rsync_ssh
+    priority: 62
+    action: allow
+    severity: ""
+    confidence: 0.80
+    description: >
+      Allows scp and rsync deployment commands when: no sensitive/critical file targets,
+      no DLP hit, no data upload flag, and no SSH reverse/forward tunnel flags (-R/-L).
+    tags: [network, deploy, scp]
+    condition:
+      and:
+        - any_verb: [scp, rsync]
+        - expr: >
+            !any(commands, {
+              .binary == "ssh" && any(.args, {# == "-R" || # == "-L"})
+            })
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - network:
+            has_data_flag: false
+
+  - name: benign_file_write_project
+    priority: 63
+    action: allow
+    severity: ""
+    confidence: 0.90
+    description: >
+      Allows file_write tool operations where all paths are within the project directory
+      and no sensitive or critical paths are targeted.
+    tags: [filesystem, write, project]
+    condition:
+      and:
+        - tool_category: file_write
+        - path:
+            all_in_project: true
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+
+  - name: benign_safe_read_system
+    priority: 63
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows read-only shell commands (ls, cat, head, tail, stat, wc, file, less, more)
+      on /etc/* and /usr/share/* and /usr/local/* paths that are flagged as critical but
+      not sensitive. Excludes /proc, /sys, /dev (runtime state exposure). No DLP hit,
+      network score <= 0.1.
+    tags: [shell, read-only, system]
+    condition:
+      and:
+        - tool_category: shell
+        - path:
+            has_sensitive: false
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - expr: "network_score <= 0.1"
+        - expr: >
+            len(verbs) > 0 &&
+            all(verbs, {# == "ls" || # == "cat" || # == "head" || # == "tail" || # == "stat" ||
+              # == "wc" || # == "file" || # == "less" || # == "more"})
+        - path:
+            has_critical: true
+        - expr: >
+            len(paths) > 0 &&
+            all(paths, {HasPrefix(#, "/etc/") || HasPrefix(#, "/usr/share/") || HasPrefix(#, "/usr/local/") || # == "/etc"})
+
+  - name: benign_file_delete_project
+    priority: 64
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows file_delete tool operations where all paths are within the project directory
+      and no sensitive or critical paths are targeted.
+    tags: [filesystem, delete, project]
+    condition:
+      and:
+        - tool_category: file_delete
+        - path:
+            all_in_project: true
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+
+  - name: benign_shell_low_danger
+    priority: 65
+    action: allow
+    severity: ""
+    confidence: 0.80
+    description: >
+      Allows shell commands when: max verb danger < 0.30, no shell interpreter verbs,
+      no sensitive/critical paths, network score <= 0.20, no data upload flag, no real
+      DLP hit, evasion score <= 0.20.
+    tags: [shell, low-danger]
+    condition:
+      and:
+        - tool_category: shell
+        - expr: "max_verb_danger < 0.30"
+        - expr: >
+            !any(verbs, {# == "bash" || # == "sh" || # == "zsh" || # == "python" || # == "python3" ||
+              # == "node" || # == "nodejs" || # == "perl" || # == "ruby" || # == "php" || # == "lua" || # == "awk"})
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+        - expr: "network_score <= 0.20 && !has_data_flag"
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - expr: "evasion_score <= 0.20"
+        - expr: "len(verbs) > 0"
+
+  - name: benign_safe_cmd_all_verbs
+    priority: 66
+    action: allow
+    severity: ""
+    confidence: 0.85
+    description: >
+      Allows shell commands where every verb is in the known-safe read-only set (ls, cat,
+      echo, pwd, whoami, date, head, tail, wc, file, stat, grep, which, type, df, du, ps,
+      printenv, env, uname, hostname, id, groups, man, info, find). find -exec with
+      elevated-danger commands (rm, etc.) is excluded.
+    tags: [shell, read-only, safe-all-verbs]
+    condition:
+      and:
+        - tool_category: shell
+        - path:
+            has_sensitive: false
+        - path:
+            has_critical: false
+        - expr: "!(dlp_has_hit && !dlp_all_test)"
+        - expr: >
+            len(verbs) > 0 &&
+            all(verbs, {# == "ls" || # == "cat" || # == "echo" || # == "pwd" || # == "whoami" ||
+              # == "date" || # == "head" || # == "tail" || # == "wc" || # == "file" ||
+              # == "stat" || # == "grep" || # == "which" || # == "type" ||
+              # == "df" || # == "du" || # == "ps" || # == "printenv" || # == "env" ||
+              # == "uname" || # == "hostname" || # == "id" || # == "groups" ||
+              # == "man" || # == "info" || # == "find"})
+        - expr: >
+            !any(commands, {
+              .binary == "find" && any(.args, {# == "-exec"}) &&
+              any(.args, {# == "rm" || # == "mkfs" || # == "dd" || # == "fdisk" || # == "nc" || # == "ncat" || # == "socat" || # == "wget" || # == "curl"})
+            })

@@ -501,7 +501,12 @@ func loadCommandDB() (*extract.CommandDB, error) {
 			return extract.LoadCommandDB(p)
 		}
 	}
-	return nil, fmt.Errorf("command DB not found")
+	// Fall back to embedded command DB.
+	data, err := embeddedCommandDB.ReadFile("policies/data/commands.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("command DB not found: %w", err)
+	}
+	return extract.ParseCommandDB(data)
 }
 
 func loadYAMLRules() []policy.CompiledRule {
@@ -525,6 +530,26 @@ func loadYAMLRules() []policy.CompiledRule {
 			continue
 		}
 		seen[base] = true
+		compiled, err := policy.CompileFile(pf)
+		if err != nil {
+			continue
+		}
+		allRules = append(allRules, compiled...)
+	}
+
+	// Fall back to embedded policies for any files not loaded from filesystem.
+	for _, name := range []string{"phase1-deny.yaml", "phase1-allow.yaml", "phase1-escalate.yaml"} {
+		if seen[name] {
+			continue
+		}
+		data, err := embeddedPolicyFiles.ReadFile("policies/" + name)
+		if err != nil {
+			continue
+		}
+		pf, err := policy.LoadBytes(data)
+		if err != nil {
+			continue
+		}
 		compiled, err := policy.CompileFile(pf)
 		if err != nil {
 			continue
