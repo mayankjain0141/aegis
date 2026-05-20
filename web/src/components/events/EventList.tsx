@@ -44,11 +44,7 @@ function Row({
   )
 }
 
-interface EventListProps {
-  height?: number
-}
-
-export function EventList({ height = window.innerHeight - 100 }: EventListProps) {
+export function EventList() {
   const { filter, setFilter, filteredEvents, selectEvent, selectedId } = useEventsStore()
   const events = filteredEvents()
   // isInitialLoad starts true — shows skeleton on the very first render cycle
@@ -83,16 +79,16 @@ export function EventList({ height = window.innerHeight - 100 }: EventListProps)
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full overflow-hidden">
       <FilterBar filter={filter} setFilter={setFilter} />
-      <div className="flex-1">
+      <div className="flex-1 min-h-0">
         <List<RowProps>
-          defaultHeight={height}
+          defaultHeight={600}
           rowCount={events.length}
           rowHeight={40}
           rowComponent={Row}
           rowProps={{ events, selectedId, onSelect: selectEvent }}
-          style={{ height }}
+          style={{ height: '100%' }}
         />
       </div>
     </div>

@@ -19,7 +19,7 @@ export function SignalBar({ name, score, isTriggered, index = 0 }: Props) {
       <div className="flex-1 h-1.5 bg-panel rounded-full overflow-hidden border border-border-faint">
         <div
           data-fill
-          className={`h-full rounded-full transition-all duration-400 ease-out ${fillColor(score)}`}
+          className={`h-full rounded-full transition-all duration-300 ease-out ${fillColor(score)}`}
           style={{ width: `${score * 100}%`, transitionDelay: `${index * 50}ms` }}
         />
       </div>

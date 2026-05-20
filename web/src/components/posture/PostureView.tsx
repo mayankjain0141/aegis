@@ -44,7 +44,7 @@ export function PostureView() {
     : undefined
 
   return (
-    <div className="p-6 overflow-y-auto">
+    <div className="p-6 overflow-y-auto h-full">
       <div className="text-14 font-sans font-semibold text-zinc-200 mb-4">Security Posture</div>
       <div className="grid grid-cols-4 gap-3 mb-6">
         <StatCard label="Total Events" value={total.toLocaleString()} />

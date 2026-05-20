@@ -13,7 +13,7 @@ export function TopBar({ onOpenPalette = () => {} }: TopBarProps) {
     <div className="h-10 flex items-center px-4 border-b border-border bg-raised">
       <span className="font-sans text-13 font-semibold text-zinc-200">Aegis</span>
       <span className="ml-2 text-10 font-sans uppercase tracking-wide text-zinc-600">AI Agent Security</span>
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex items-center gap-3 shrink-0">
         <RateIndicator />
         <button
           onClick={isRunning ? pause : resume}

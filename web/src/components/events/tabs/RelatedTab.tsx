@@ -10,7 +10,7 @@ export function RelatedTab({ event }: Props) {
   const sameSession = events.filter(e => e.id !== event.id && e.session_id === event.session_id).slice(0, 8)
 
   return (
-    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1">
+    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-h-0">
       <Section title={`Same Rule: ${event.rule}`} items={sameRule} onSelect={selectEvent} />
       {sameSession.length > 0 && (
         <Section title="Same Session" items={sameSession} onSelect={selectEvent} />

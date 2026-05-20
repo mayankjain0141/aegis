@@ -73,6 +73,16 @@ function generateSpans(totalUs: number, phase: Phase): Span[] {
   const weights = spanNames.map(() => Math.random())
   const totalWeight = weights.reduce((a, b) => a + b, 0)
 
+  const META: Record<string, Record<string, unknown>> = {
+    normalize: { stripped_wrappers: ['sudo', 'env'], normalized: true },
+    signal_extract: { signals_computed: 6, extraction_method: 'fast' },
+    eval_chain: { rules_evaluated: randInt(5, 15), first_match_at: randInt(2, 8) },
+    policy_match: { matched: true, priority: randInt(1, 20) },
+    behavioral_check: { baseline_established: true, deviation: parseFloat(randFloat(0, 1).toFixed(3)) },
+    sequence_match: { patterns_checked: 12, matches: randInt(0, 3) },
+    llm_classify: { model: 'claude-3-haiku', tokens_used: randInt(200, 800), cache_hit: false },
+  }
+
   let cursor = 0
   const spans: Span[] = spanNames.map((name, i) => {
     const duration = Math.round((weights[i] / totalWeight) * totalUs)
@@ -81,6 +91,7 @@ function generateSpans(totalUs: number, phase: Phase): Span[] {
       start_us: cursor,
       duration_us: duration,
       phase,
+      metadata: META[name],
     }
     cursor += duration
     return span

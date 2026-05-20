@@ -1,5 +1,6 @@
 import type { AegisEvent } from '../types'
 import { generateNextEvent, generateAttackBurst } from './scenarios'
+import { useStreamStore } from '../../stores/stream'
 
 export interface StreamOptions {
   intervalMs?: [number, number]  // [min, max] random interval range
@@ -29,6 +30,7 @@ export function createEventStream(options: StreamOptions): StreamControl {
         const event = generateNextEvent(history)
         history.push(event)
         options.onEvent(event)
+        useStreamStore.getState().recordEvent()
 
         // Schedule attack burst at ~8s
         if (!attackScheduled && history.length > 4) {
@@ -41,6 +43,7 @@ export function createEventStream(options: StreamOptions): StreamControl {
                 if (!stopped) {
                   history.push(e)
                   options.onEvent(e)
+                  useStreamStore.getState().recordEvent()
                 }
               }, i * 600)
             })

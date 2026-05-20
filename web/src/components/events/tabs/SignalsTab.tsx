@@ -7,7 +7,7 @@ interface Props { event: AegisEvent }
 export function SignalsTab({ event }: Props) {
   const { signals } = event
   return (
-    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1">
+    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-h-0">
       <div className="flex gap-4 items-start">
         <div className="flex flex-col items-center gap-1">
           <div className="text-10 font-sans uppercase tracking-wide text-zinc-600 mb-1">Signal Radar</div>

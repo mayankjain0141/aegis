@@ -14,7 +14,7 @@ interface Props { event: AegisEvent }
 
 export function SummaryTab({ event }: Props) {
   return (
-    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1">
+    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-h-0">
       <CommandBlock event={event} />
       <div className="flex gap-3">
         <div className="w-56 shrink-0"><VerdictCard event={event} /></div>

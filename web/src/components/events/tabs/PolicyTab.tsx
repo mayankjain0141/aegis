@@ -6,7 +6,7 @@ interface Props { event: AegisEvent }
 
 export function PolicyTab({ event }: Props) {
   return (
-    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1">
+    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-h-0">
       <EvalChain evalChain={event.eval_chain} matchedRule={event.rule} />
       <PolicySource
         file={event.policy_source.file}

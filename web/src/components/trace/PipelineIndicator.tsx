@@ -44,7 +44,7 @@ export function PipelineIndicator({ event }: Props) {
             <div key={i} className="flex items-center gap-1 shrink-0">
               <div className="flex flex-col items-center">
                 <div className={`w-2 h-2 rounded-full ${PHASE_COLOR[span.phase]}`} />
-                <span className="font-mono text-10 text-zinc-600 mt-0.5 max-w-12 truncate">{SPAN_LABELS[span.name] ?? span.name.replace(/_/g, ' ')}</span>
+                <span className="font-mono text-10 text-zinc-600 mt-0.5 max-w-16 text-center truncate">{SPAN_LABELS[span.name] ?? span.name.replace(/_/g, ' ')}</span>
               </div>
               {i < trace.spans.length - 1 && <div className="w-4 h-px bg-border-faint shrink-0" />}
             </div>

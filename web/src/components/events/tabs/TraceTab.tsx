@@ -48,11 +48,33 @@ function SpanRow({ span, total }: { span: Span; total: number }) {
         )}
         <span className="text-zinc-600 text-10 ml-1">{open ? '▲' : '▼'}</span>
       </div>
-      {open && span.metadata && (
-        <div className="px-3 pb-2 border-t border-border-faint">
-          <pre className="font-mono text-10 text-zinc-500 mt-2 whitespace-pre-wrap">
-            {JSON.stringify(span.metadata, null, 2)}
-          </pre>
+      {open && (
+        <div className="px-3 pb-3 border-t border-border-faint bg-base/50">
+          <div className="grid grid-cols-3 gap-3 mt-2 mb-2">
+            <div>
+              <div className="text-10 font-sans uppercase tracking-wide text-zinc-600 mb-0.5">Start</div>
+              <div className="font-mono text-11 text-zinc-400">{formatDuration(span.start_us)}</div>
+            </div>
+            <div>
+              <div className="text-10 font-sans uppercase tracking-wide text-zinc-600 mb-0.5">Duration</div>
+              <div className="font-mono text-11 text-zinc-400">{formatDuration(span.duration_us)}</div>
+            </div>
+            <div>
+              <div className="text-10 font-sans uppercase tracking-wide text-zinc-600 mb-0.5">Phase</div>
+              <div className={`font-mono text-11 ${PHASE_TEXT[span.phase]}`}>P{span.phase}</div>
+            </div>
+          </div>
+          {span.result && (
+            <div className="mb-2">
+              <div className="text-10 font-sans uppercase tracking-wide text-zinc-600 mb-0.5">Result</div>
+              <div className={`font-mono text-11 ${span.result === 'match' ? 'text-deny' : 'text-zinc-500'}`}>{span.result}</div>
+            </div>
+          )}
+          {span.metadata && (
+            <pre className="font-mono text-10 text-zinc-500 whitespace-pre-wrap bg-panel rounded p-2 mt-1">
+              {JSON.stringify(span.metadata, null, 2)}
+            </pre>
+          )}
         </div>
       )}
     </div>
@@ -62,7 +84,7 @@ function SpanRow({ span, total }: { span: Span; total: number }) {
 export function TraceTab({ event }: Props) {
   const total = event.trace.total_us || event.latency_us || 1
   return (
-    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1">
+    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-h-0">
       <div className="flex items-center justify-between mb-1">
         <div className="text-10 font-sans uppercase tracking-wide text-zinc-600">Execution Waterfall</div>
         <span className="font-mono text-10 text-zinc-500">total: {formatDuration(total)}</span>

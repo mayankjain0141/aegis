@@ -35,7 +35,7 @@ export function Sidebar({ activeRoute, onNavigate }: SidebarProps) {
 function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active?: boolean; onClick?: () => void }) {
   return (
     <button
-      className={`w-10 h-10 flex items-center justify-center rounded transition-colors ${active ? 'text-zinc-100 bg-panel' : 'text-zinc-500 hover:text-zinc-300 hover:bg-panel'}`}
+      className={`w-10 h-10 flex items-center justify-center rounded transition-colors ${active ? 'text-zinc-100 bg-panel ring-1 ring-border-strong' : 'text-zinc-500 hover:text-zinc-300 hover:bg-panel'}`}
       title={label}
       onClick={onClick}
     >

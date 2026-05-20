@@ -4,7 +4,7 @@ interface Props { event: AegisEvent }
 
 export function ContextTab({ event }: Props) {
   return (
-    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1">
+    <div className="flex flex-col gap-3 p-4 overflow-y-auto flex-1 min-h-0">
       <div className="border border-border rounded p-3 bg-panel">
         <div className="text-10 font-sans uppercase tracking-wide text-zinc-600 mb-3">Session Context</div>
         <div className="grid grid-cols-2 gap-3">
