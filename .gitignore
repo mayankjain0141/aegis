@@ -12,7 +12,8 @@ __pycache__/
 .venv/
 .planning/
 temp/
-docs/
+docs/*.html
+private/
 .cursor/plans/
 key.pem
 *.sock
