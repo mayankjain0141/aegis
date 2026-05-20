@@ -213,9 +213,14 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 
 	// Fast path: bloom filter + allowlist short-circuit
 	if allow, rule := e.fastPath.Check(req, argsJSON); allow {
-		d := &Decision{Action: ActionAllow, Rule: rule, Confidence: 1.00, Stage: StageFastPath}
-		e.recorder.Record(req, d, 0.0, nil)
-		return d
+		// Safety valve: don't trust bloom for obviously dangerous commands
+		if cmd, ok := req.Arguments["command"].(string); ok && mlScorer.Score(cmd) > 0.8 {
+			// Fall through to full evaluation
+		} else {
+			d := &Decision{Action: ActionAllow, Rule: rule, Confidence: 1.00, Stage: StageFastPath}
+			e.recorder.Record(req, d, 0.0, nil)
+			return d
+		}
 	}
 
 	// Static rule engine
