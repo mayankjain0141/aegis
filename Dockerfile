@@ -3,12 +3,13 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /aegis-daemon ./cmd/daemon
+RUN CGO_ENABLED=0 go build -o /aegis ./cmd/aegis
+RUN CGO_ENABLED=0 go build -o /aegis-hook ./cmd/hook
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
-COPY --from=builder /aegis-daemon /usr/local/bin/aegis-daemon
+COPY --from=builder /aegis /usr/local/bin/aegis
+COPY --from=builder /aegis-hook /usr/local/bin/aegis-hook
 COPY policies/ /etc/aegis/policies/
-COPY aegis.yaml /etc/aegis/aegis.yaml
-ENTRYPOINT ["aegis-daemon"]
-CMD ["--socket", "/tmp/aegis.sock", "--policies", "/etc/aegis/policies/default.yaml", "--config", "/etc/aegis/aegis.yaml"]
+ENTRYPOINT ["aegis"]
+CMD ["daemon", "run"]

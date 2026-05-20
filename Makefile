@@ -1,12 +1,10 @@
 .PHONY: build install test smoke test-attacks bench lint fmt ci integration eval eval-bench eval-regression eval-save-baseline hook demo-ui up down logs ml-test ml-train models
 
 build:
-	go build -buildvcs=false -o bin/aegis-daemon ./cmd/daemon
 	go build -buildvcs=false -o bin/aegis ./cmd/aegis
-	go build -buildvcs=false -o .cursor/hooks/aegis ./cmd/hook
+	go build -buildvcs=false -o bin/hook ./cmd/hook
 
 install:
-	go install ./cmd/daemon
 	go install ./cmd/aegis
 	go install ./cmd/hook
 
