@@ -229,13 +229,16 @@ func tryDaemon(req *normalizedRequest) *aegis.Decision {
 
 // evalInline runs the engine in-process (Phase 1 only, no session state).
 func evalInline(req *normalizedRequest) *aegis.Decision {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
 	engine, err := aegis.NewEngine()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "aegis: engine init error (fail-open):", err)
 		return &aegis.Decision{Action: aegis.ActionAllow, Rule: "engine_error"}
 	}
 
-	return engine.Evaluate(context.Background(), &aegis.Request{
+	return engine.Evaluate(ctx, &aegis.Request{
 		Tool:      req.Tool,
 		Arguments: req.Arguments,
 		CWD:       req.CWD,
