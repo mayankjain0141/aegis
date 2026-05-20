@@ -338,23 +338,6 @@ func (b *EWMABaseline) Freeze() { b.frozen = true }
 
 func (b *EWMABaseline) Established() bool { return b.sampleCount >= b.minSamples }
 
-func (b *EWMABaseline) Deviation(tool string) float64 {
-	if !b.Established() {
-		return 0.0
-	}
-	w := b.weights[tool]
-	maxW := 0.0
-	for _, v := range b.weights {
-		if v > maxW {
-			maxW = v
-		}
-	}
-	if maxW == 0 {
-		return 0.0
-	}
-	return 1.0 - (w / maxW)
-}
-
 // Freeze freezes the session's EWMA baseline.
 func (s *State) Freeze() {
 	s.mu.Lock()

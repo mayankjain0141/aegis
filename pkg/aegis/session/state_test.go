@@ -252,37 +252,3 @@ func TestConcurrentAccess_NoRace(t *testing.T) {
 	<-done
 }
 
-// ── EWMA Baseline (TEST 4.1, TEST 4.2) ───────────────────────────────────
-
-func TestBaseline_AdaptsToDeployPhase(t *testing.T) {
-	// TEST 4.1: After warmup with git/go, docker/kubectl has moderate deviation.
-	// Baseline must adapt — legitimate phase transitions should not scream anomaly.
-	bl := NewEWMABaseline(0.02, 10)
-	for i := 0; i < 20; i++ {
-		bl.Update("git")
-	}
-	for i := 0; i < 15; i++ {
-		bl.Update("docker")
-	}
-	dev := bl.Deviation("docker")
-	if dev >= 0.6 {
-		t.Errorf("docker deviation after adaptation = %.2f, want < 0.6 (should have adapted, not screaming anomaly)", dev)
-	}
-}
-
-func TestBaseline_FreezesOnThreat(t *testing.T) {
-	// TEST 4.2: After Freeze(), attacker cannot poison the baseline.
-	// 50 curl calls after freeze must not reduce curl's deviation.
-	bl := NewEWMABaseline(0.02, 10)
-	for i := 0; i < 20; i++ {
-		bl.Update("git")
-	}
-	bl.Freeze()
-	for i := 0; i < 50; i++ {
-		bl.Update("curl") // attacker tries to warm baseline
-	}
-	dev := bl.Deviation("curl")
-	if dev < 0.7 {
-		t.Errorf("curl deviation after freeze+poison = %.2f, want >= 0.7 (baseline frozen, poisoning must fail)", dev)
-	}
-}

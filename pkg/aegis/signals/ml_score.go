@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"strings"
-	"sync"
 )
 
 // xgbTree is a single decision tree from the XGBoost JSON model.
@@ -48,12 +47,6 @@ type MLScorer struct {
 	model        *xgbModel
 	vocab        map[string]int
 }
-
-// scorerCache is a package-level singleton so the model is loaded once.
-var (
-	defaultScorer     *MLScorer
-	defaultScorerOnce sync.Once
-)
 
 // NewMLScorer creates an MLScorer. modelPath and vocabPath may be "" to use defaults.
 // Falls back to heuristic scoring when model files are absent.
