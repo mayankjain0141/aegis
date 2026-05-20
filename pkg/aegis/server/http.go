@@ -62,7 +62,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		s.httpServer.Close()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		s.httpServer.Shutdown(shutdownCtx) //nolint:errcheck
 	}()
 
 	return s.httpServer.Serve(ln)
