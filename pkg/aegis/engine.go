@@ -222,6 +222,10 @@ func (e *Engine) Evaluate(ctx context.Context, req *Request) *Decision {
 	bundle := e.sigComp.Compute(req.Tool, argsJSON, req.CWD)
 	composite := signals.CompositeScore(bundle)
 
+	if ctx.Err() != nil {
+		return &Decision{Action: ActionAllow, Rule: "context_expired", Confidence: 1.0, Stage: StageFastPath}
+	}
+
 	rule, matched := e.evaluator.Evaluate(bundle)
 	var staticDecision *Decision
 	if !matched {
