@@ -1,7 +1,0 @@
-services:
-  daemon:
-    build: .
-    volumes:
-      - /tmp/aegis-daemon.sock:/tmp/aegis-daemon.sock
-    ports:
-      - "8080:8080"
